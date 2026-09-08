@@ -1,0 +1,380 @@
+blueprint:
+  name: Marstek B2500 Dynamische Nulleinspeisung
+  description: >-
+    Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis eines
+    Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel Leistung ab,
+    wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
+
+
+    Die Regelung ist gedaempft ausgelegt: pro Schritt wird nur ein Teil der
+    gemessenen Abweichung ausgeregelt, und zwischen zwei Sollwertaenderungen
+    liegt eine Mindestwartezeit. Das verhindert das Aufschaukeln, das entsteht,
+    weil Sensoren und Speicher die Wirkung einer Korrektur erst mit Verzoegerung
+    zurueckmelden.
+
+
+    Enthalten: SoC-Hysterese gegen Tiefentladung, Drosselung auf einen festen
+    Sparwert bei niedrigem Akkustand oder Lastspitzen (nur wenn die Ladeleistung
+    die geplante Ausgabe nicht traegt, mit eigener Hysterese), Hardware-
+    Mindestleistung, Totband und Schutz gegen unverfuegbare Sensoren.
+
+
+    Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
+    Einspeisung sein. Empfohlen wird ein leicht geglaetteter Sensor
+    (Statistik-Helfer, Median, Fenster ca. 15 s).
+  domain: automation
+  source_url: https://github.com/tobiasscheiderer-prog/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    entitaeten:
+      name: Entitäten
+      icon: mdi:home-battery
+      collapsed: false
+      input:
+        grid_power_sensor:
+          name: Netzleistungssensor
+          description: >-
+            Aktuelle Netzleistung. Positiv = Bezug aus dem Netz, negativ =
+            Einspeisung. Am besten ein geglätteter Sensor (Median-Helfer).
+          selector:
+            entity:
+              domain: sensor
+        speicher_output_sensor:
+          name: Speicher-Ausgangsleistung
+          description: Aktuell vom Speicher abgegebene Leistung in Watt.
+          selector:
+            entity:
+              domain: sensor
+        speicher_input_sensor:
+          name: Speicher-Ladeleistung
+          description: >-
+            Aktuell in den Speicher fließende Ladeleistung in Watt (z. B. von PV).
+            Hebt die Drosselung auf, wenn genug nachgeladen wird.
+          selector:
+            entity:
+              domain: sensor
+        speicher_soc_sensor:
+          name: Speicher-Ladezustand (SoC)
+          description: Aktueller Ladezustand des Speichers in Prozent.
+          selector:
+            entity:
+              domain: sensor
+        speicher_switch:
+          name: Ausgabe-Schalter (Time Period)
+          description: Schalter, der die Leistungsausgabe des Speichers aktiviert.
+          selector:
+            entity:
+              domain: switch
+        speicher_watt_number:
+          name: Ausgabe-Sollwert (Time Period)
+          description: >-
+            Number-Entity, über die der Watt-Sollwert gesetzt wird. Deren
+            Änderungszeitpunkt dient zugleich als Basis für die Wartezeiten.
+          selector:
+            entity:
+              domain: number
+
+    regelung:
+      name: Regelverhalten
+      icon: mdi:sine-wave
+      collapsed: false
+      input:
+        kp:
+          name: Regelverstärkung (Kp)
+          description: >-
+            Anteil der gemessenen Abweichung, der pro Schritt ausgeregelt wird.
+            1.0 korrigiert den vollen Fehler sofort und neigt zum Überschwingen.
+            Bei Schwingen verringern, bei trägem Verhalten erhöhen.
+          default: 0.6
+          selector:
+            number:
+              min: 0.1
+              max: 1
+              step: 0.05
+              mode: slider
+        totband_watt:
+          name: Totband
+          description: >-
+            Mindestabweichung zwischen aktueller Abgabe und Zielwert, damit
+            überhaupt nachgeregelt wird.
+          default: 25
+          selector:
+            number:
+              min: 0
+              max: 200
+              unit_of_measurement: "W"
+              mode: box
+        wartezeit_hoch:
+          name: Wartezeit beim Erhöhen
+          description: >-
+            Mindestabstand seit der letzten Sollwertänderung, bevor erhöht wird.
+            Gibt dem Regelkreis Zeit zum Einschwingen.
+          default: 20
+          selector:
+            number:
+              min: 0
+              max: 300
+              unit_of_measurement: "s"
+              mode: box
+        wartezeit_runter:
+          name: Wartezeit beim Reduzieren
+          description: >-
+            Mindestabstand beim Verringern. Kürzer als beim Erhöhen, damit bei
+            wegfallender Last nicht lange eingespeist wird.
+          default: 8
+          selector:
+            number:
+              min: 0
+              max: 300
+              unit_of_measurement: "s"
+              mode: box
+
+    akku_schutz:
+      name: Akku-Schutz
+      icon: mdi:battery-alert
+      collapsed: true
+      input:
+        soc_off:
+          name: SoC Abschaltschwelle
+          description: Bei diesem Ladezustand oder darunter wird die Ausgabe gesperrt.
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: slider
+        soc_on:
+          name: SoC Wiedereinschaltschwelle
+          description: >-
+            Erst ab diesem Ladezustand wird eine abgeschaltete Ausgabe wieder
+            freigegeben. Muss über der Abschaltschwelle liegen.
+          default: 25
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: slider
+        soc_drossel:
+          name: SoC Drosselschwelle (Eco)
+          description: >-
+            Unterhalb dieses Ladezustands wird auf den Drosselwert begrenzt,
+            sofern nicht genug nachgeladen wird.
+          default: 40
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+              mode: slider
+
+    leistung:
+      name: Leistungsgrenzen
+      icon: mdi:speedometer
+      collapsed: true
+      input:
+        max_watt:
+          name: Maximale Ausgabeleistung
+          description: Obergrenze der Ausgabe im Normalbetrieb.
+          default: 800
+          selector:
+            number:
+              min: 0
+              max: 2500
+              unit_of_measurement: "W"
+              mode: box
+        drossel_watt:
+          name: Gedrosselte Ausgabeleistung
+          description: >-
+            Fester Ausgabewert bei niedrigem Akkustand oder Lastspitzen. Muss
+            mindestens so hoch wie die Hardware-Mindestleistung sein.
+          default: 200
+          selector:
+            number:
+              min: 0
+              max: 2500
+              unit_of_measurement: "W"
+              mode: box
+        hw_min_watt:
+          name: Hardware-Mindestleistung
+          description: >-
+            Liegt der berechnete Sollwert darunter, wird auf 0 gesetzt und die
+            Ausgabe abgeschaltet. Deckt auch Einspeisung/Überschuss ab.
+          default: 80
+          selector:
+            number:
+              min: 0
+              max: 500
+              unit_of_measurement: "W"
+              mode: box
+        drossel_hysterese:
+          name: Hysterese der Drosselung
+          description: >-
+            Zusatzbedarf an Ladeleistung, um aus der Drosselung wieder in den
+            Normalbetrieb zu wechseln. Verhindert Springen zwischen gedrosselter
+            und voller Ausgabe bei schwankender PV-Leistung.
+          default: 100
+          selector:
+            number:
+              min: 0
+              max: 500
+              unit_of_measurement: "W"
+              mode: box
+
+    feintuning:
+      name: Feintuning
+      icon: mdi:tune
+      collapsed: true
+      input:
+        max_sensor_alter:
+          name: Maximales Alter des Netzwerts
+          description: >-
+            Ist der Netzleistungssensor länger nicht aktualisiert worden, wird
+            nicht geregelt. Schützt vor eingefrorenen Werten, etwa bei einer
+            Störung der Powerfox-Cloud. 0 deaktiviert die Prüfung.
+          default: 120
+          selector:
+            number:
+              min: 0
+              max: 900
+              unit_of_measurement: "s"
+              mode: box
+        soc_trigger:
+          name: Zusätzlicher SoC-Trigger
+          description: >-
+            Auch auf Änderungen des Ladezustands reagieren, damit Schwellwerte
+            sofort greifen und nicht erst beim nächsten Netz-Update.
+          default: true
+          selector:
+            boolean:
+
+mode: restart
+
+triggers:
+  - trigger: state
+    entity_id: !input grid_power_sensor
+  - trigger: state
+    entity_id: !input speicher_soc_sensor
+    id: soc
+
+conditions: []
+
+actions:
+  - variables:
+      e_grid: !input grid_power_sensor
+      e_out: !input speicher_output_sensor
+      e_in: !input speicher_input_sensor
+      e_soc: !input speicher_soc_sensor
+      e_switch: !input speicher_switch
+      e_number: !input speicher_watt_number
+      soc_trigger_aktiv: !input soc_trigger
+      max_alter_v: !input max_sensor_alter
+
+  # SoC-Trigger nur auswerten, wenn in den Optionen aktiviert
+  - condition: template
+    value_template: >-
+      {{ trigger.id is not defined or trigger.id != 'soc' or soc_trigger_aktiv }}
+
+  # Abbruch, wenn ein benoetigter Sensor keinen gueltigen Wert liefert.
+  # Sonst wuerde float(0) z. B. einen SoC von 0 % vortaeuschen.
+  - condition: template
+    value_template: >-
+      {{ has_value(e_grid) and has_value(e_out)
+         and has_value(e_in) and has_value(e_soc) }}
+
+  # Abbruch bei eingefrorenem Netzwert (Keep-last-sample haelt den alten Wert,
+  # der Sensor wird dabei nicht unavailable)
+  - condition: template
+    value_template: >-
+      {{ max_alter_v | float(0) == 0
+         or (now() - states[e_grid].last_updated).total_seconds() < max_alter_v | float(0) }}
+
+  - variables:
+      grid_p: "{{ states(e_grid) | float(0) }}"
+      speicher_out: "{{ states(e_out) | float(0) }}"
+      speicher_in: "{{ states(e_in) | float(0) }}"
+      soc: "{{ states(e_soc) | float(0) }}"
+      switch_status: "{{ states(e_switch) }}"
+      kp_v: !input kp
+      totband_v: !input totband_watt
+      wartezeit_hoch_v: !input wartezeit_hoch
+      wartezeit_runter_v: !input wartezeit_runter
+      soc_off_v: !input soc_off
+      soc_on_v: !input soc_on
+      soc_drossel_v: !input soc_drossel
+      max_watt_v: !input max_watt
+      drossel_watt_v: !input drossel_watt
+      hw_min_watt_v: !input hw_min_watt
+      drossel_hyst_v: !input drossel_hysterese
+      # Gedaempfte Korrektur: nur der Anteil kp der Abweichung wird ausgeregelt
+      sollwert: "{{ speicher_out + grid_p * kp_v }}"
+      wunsch: "{{ [sollwert | float(0), max_watt_v] | min }}"
+      ziel_leistung: >
+        {# 1. Tiefentladeschutz mit Hysterese #}
+        {% if soc <= soc_off_v %}
+          0
+        {% elif soc < soc_on_v and speicher_out == 0 %}
+          0
+        {# 2. Hardware-Limit: zu kleiner Bedarf oder Ueberschuss -> aus #}
+        {% elif sollwert < hw_min_watt_v %}
+          0
+        {# 3. Drossel-Regel bei niedrigem Akku oder Lastspitze, aber nur wenn die
+        Ladeleistung die geplante Ausgabe nicht traegt. Aus der Drosselung heraus
+        braucht es zusaetzlich die Hysterese, damit es nicht hin- und herspringt #}
+        {% elif (soc < soc_drossel_v or sollwert > max_watt_v)
+                and wunsch > drossel_watt_v
+                and speicher_in < wunsch + (drossel_hyst_v if speicher_out <= drossel_watt_v + 20 else 0) %}
+          {{ drossel_watt_v }}
+        {# 4. Normalbetrieb #}
+        {% else %}
+          {{ wunsch | round(0) }}
+        {% endif %}
+      # Sekunden seit der letzten tatsaechlichen Sollwertaenderung
+      seit_aenderung: >-
+        {{ (now() - states[e_number].last_changed).total_seconds() }}
+      # Abschalten sofort, Reduzieren zuegig, Erhoehen erst nach Einschwingen
+      wartezeit: >-
+        {% set z = ziel_leistung | float(0) %}
+        {% if z == 0 %}0
+        {% elif z < speicher_out %}{{ wartezeit_runter_v }}
+        {% else %}{{ wartezeit_hoch_v }}{% endif %}
+
+  # Totband: kleine Abweichungen ignorieren
+  - condition: template
+    value_template: "{{ (ziel_leistung | float(0) - speicher_out) | abs >= totband_v }}"
+
+  # Mindestabstand zwischen Sollwertaenderungen
+  - condition: template
+    value_template: "{{ seit_aenderung | float(0) >= wartezeit | float(999) }}"
+
+  - choose:
+      # 0 W gewuenscht -> Ausgabe abschalten (nur falls nicht schon aus)
+      - conditions:
+          - condition: template
+            value_template: "{{ ziel_leistung | float(0) == 0 }}"
+          - condition: template
+            value_template: "{{ switch_status != 'off' }}"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input speicher_switch
+
+      # Leistung gewuenscht -> erst Wert setzen, dann ggf. einschalten
+      - conditions:
+          - condition: template
+            value_template: "{{ ziel_leistung | float(0) >= hw_min_watt_v }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: !input speicher_watt_number
+            data:
+              value: "{{ ziel_leistung | float(0) }}"
+          - if:
+              - condition: template
+                value_template: "{{ switch_status != 'on' }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: !input speicher_switch
