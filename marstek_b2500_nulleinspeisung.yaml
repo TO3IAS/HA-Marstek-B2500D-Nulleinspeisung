@@ -23,7 +23,7 @@ blueprint:
     Einspeisung sein. Empfohlen wird ein leicht geglaetteter Sensor
     (Statistik-Helfer, Median, Fenster ca. 15 s).
   domain: automation
-  source_url: https://github.com/tobiasscheiderer-prog/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
+  source_url: https://github.com/TO3IAS/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
   homeassistant:
     min_version: "2024.10.0"
   input:

@@ -68,12 +68,12 @@ Größere Fenster glätten besser, kosten aber Reaktionszeit: Der Median hinkt d
 
 ### Variante A – Import per Link (empfohlen)
 
-[![Blueprint importieren](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Ftobiasscheiderer-prog%2FHA-Marstek-B2500D-Nulleinspeisung%2Fblob%2Fmain%2Fmarstek_b2500_nulleinspeisung.yaml)
+[![Blueprint importieren](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FTO3IAS%2FHA-Marstek-B2500D-Nulleinspeisung%2Fblob%2Fmain%2Fmarstek_b2500_nulleinspeisung.yaml)
 
 Alternativ in Home Assistant unter *Einstellungen → Automatisierungen & Szenen → Blueprints → Blueprint importieren* diese URL einfügen:
 
 ```
-https://github.com/tobiasscheiderer-prog/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
+https://github.com/TO3IAS/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
 ```
 
 ### Variante B – Manuell
