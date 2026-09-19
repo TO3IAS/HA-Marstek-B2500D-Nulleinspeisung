@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.1 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.2 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -19,10 +19,15 @@ blueprint:
 
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
-    Einspeisung sein. Fuer das Balancing muss die Ueberschusseinspeisung am
-    Speicher eingeschaltet sein - entweder dauerhaft von Hand, oder automatisch
-    ueber den optionalen Schalter, den dieses Blueprint tagsueber ein- und nach
-    Sonnenuntergang wieder ausschaltet.
+    Einspeisung sein.
+
+
+    Ueberschusseinspeisung und Zeitplan duerfen nie gleichzeitig aktiv sein,
+    sonst gibt der Speicher gar nichts mehr ab. Wird der Schalter der
+    Ueberschusseinspeisung hier angegeben, haelt die Automation die beiden
+    auseinander und schaltet die Ueberschusseinspeisung fuer das Balancing
+    tagsueber ein. Ohne den Schalter muss die Ueberschusseinspeisung dauerhaft
+    ausgeschaltet bleiben - dann findet allerdings kein Balancing statt.
   domain: automation
   source_url: https://github.com/TO3IAS/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
   homeassistant:
@@ -180,26 +185,25 @@ blueprint:
         balancing_aktiv:
           name: Balancing-Fenster
           description: >-
-            Bei 100 % Ladezustand und anliegender Ladeleistung zieht sich die
-            Regelung zurück und setzt die volle Ausgabeleistung, damit der
-            Speicher die Energie ungehindert durchleiten und dabei seine Zellen
-            balancieren kann. Dazu muss die Überschusseinspeisung am Gerät
-            eingeschaltet sein. In diesem Fenster wird ins Netz eingespeist,
-            sobald die PV-Leistung über dem Hausverbrauch liegt.
+            Schaltet die Überschusseinspeisung bei 100 % Ladezustand tagsüber
+            ein, damit der Speicher seine Zellen balancieren kann, und nach
+            Sonnenuntergang wieder aus. Setzt voraus, dass der Schalter unten
+            angegeben ist. In diesem Fenster wird ins Netz eingespeist, sobald
+            die PV-Leistung über dem Hausverbrauch liegt. Ist die Option aus,
+            fasst die Automation die Überschusseinspeisung nicht an, hält aber
+            weiterhin den Zeitplan aus, solange sie eingeschaltet ist.
           default: true
           selector:
             boolean:
         surplus_switch:
           name: Schalter Überschusseinspeisung (optional)
           description: >-
-            Wird hier der Schalter der Überschusseinspeisung angegeben, schaltet
-            die Automation ihn bei 100 % Ladezustand tagsüber ein und nach
-            Sonnenuntergang wieder aus. Damit balanciert der Speicher am Tag und
-            steht nachts trotzdem für die normale Regelung zur Verfügung – bei
-            vollem Akku und eingeschalteter Überschusseinspeisung hängt seine
-            Ausgabe sonst an der Eingangsleistung und er gibt nachts nichts ab.
-            Leer lassen, wenn die Überschusseinspeisung dauerhaft von Hand
-            eingeschaltet bleiben soll.
+            Dringend empfohlen. Ist der Schalter angegeben, sorgt die Automation
+            dafür, dass Überschusseinspeisung und Zeitplan nie gleichzeitig
+            aktiv sind, und schaltet die Überschusseinspeisung für das Balancing
+            tagsüber ein. Bleibt das Feld leer, muss die Überschusseinspeisung
+            dauerhaft ausgeschaltet bleiben – ist sie an, würde die Regelung den
+            Zeitplan dazuschalten und der Speicher stellt den Betrieb ein.
           default: []
           selector:
             entity:
@@ -368,12 +372,14 @@ actions:
       wunsch: "{{ [sollwert | float(0), max_watt_v] | min }}"
       # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
       # das BMS waehrend der Ueberschusseinspeisung balancieren kann.
-      balancing: "{{ balancing_aktiv_v and soc >= 100 and speicher_in > 0 }}"
       # Optionale Steuerung der Ueberschusseinspeisung.
       # Tag/Nacht ueber sun.sun; fehlt die Entity, gilt es als Tag.
       surplus_da: "{{ e_surplus | count > 0 }}"
       surplus_status: >-
         {{ states(e_surplus[0]) if surplus_da else 'none' }}
+      # Firmware-Verriegelung: Zeitplan und Ueberschusseinspeisung duerfen nie
+      # gleichzeitig aktiv sein, sonst stellt der Speicher den Betrieb ein.
+      surplus_an: "{{ surplus_da and surplus_status == 'on' }}"
       ist_nacht: "{{ states('sun.sun') == 'below_horizon' }}"
       # Sekunden, seit die Ladeleistung zuletzt einen anderen Wert hatte
       laden_ruht: >-
@@ -381,16 +387,20 @@ actions:
            and (now() - states[e_in].last_changed).total_seconds()
                >= surplus_nachlauf_v | float(0) * 60 }}
       surplus_ein: >-
-        {{ surplus_da and surplus_status == 'off' and soc >= 100 and not ist_nacht }}
+        {{ surplus_da and balancing_aktiv_v and surplus_status == 'off'
+           and soc >= 100 and not ist_nacht }}
       surplus_aus: >-
-        {{ surplus_da and surplus_status == 'on' and ist_nacht and laden_ruht }}
+        {{ surplus_da and balancing_aktiv_v and surplus_status == 'on'
+           and ist_nacht and laden_ruht }}
       ziel_leistung: >
         {# 0. Kein gueltiger Netzwert -> abschalten statt blind weiterregeln #}
         {% if not netz_ok %}
           0
-        {# 1. Balancing-Fenster: volle Ausgabe freigeben #}
-        {% elif balancing %}
-          {{ max_watt_v }}
+        {# 1. Ueberschusseinspeisung laeuft: Zeitplan muss aus bleiben. Beides
+        gleichzeitig vertraegt die Firmware nicht, dann gibt der Speicher gar
+        nichts mehr ab. Waehrend dieser Zeit balanciert er seine Zellen. #}
+        {% elif surplus_an %}
+          0
         {# 2. Tiefentladeschutz mit Hysterese #}
         {% elif soc <= soc_off_v %}
           0
@@ -420,12 +430,19 @@ actions:
         {% else %}{{ wartezeit_hoch_v }}{% endif %}
 
   # Ueberschusseinspeisung tagsueber freigeben, damit der volle Speicher
-  # balancieren kann. Laeuft vor den Regelbedingungen, damit ein Abbruch der
-  # Regelung diese Umschaltung nicht verhindert.
+  # balancieren kann. Der Zeitplan muss dabei zwingend zuerst aus, sonst
+  # stellt der Speicher den Betrieb komplett ein.
   - if:
       - condition: template
         value_template: "{{ surplus_ein }}"
     then:
+      - if:
+          - condition: template
+            value_template: "{{ switch_status != 'off' }}"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: !input speicher_switch
       - action: switch.turn_on
         target:
           entity_id: !input surplus_switch
