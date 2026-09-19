@@ -14,6 +14,7 @@ Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B250
 - Inkrementeller Regler mit einstellbarer Verstärkung (Kp) und Totband
 - Asymmetrische Wartezeiten: schnell reduzieren, langsam erhöhen
 - **Balancing-Fenster** bei vollem Speicher, damit das BMS die Zellen ausgleichen kann
+- Optionale **Automatik für die Überschusseinspeisung**: tagsüber ein, nachts aus
 - **Anlaufsperre**, weil der Speicher nach dem Einschalten ein bis zwei Minuten braucht
 - **Watchdog** gegen eingefrorene Messwerte, unabhängig von eintreffenden Sensordaten
 - Tiefentladeschutz mit SoC-Hysterese (Abschalten / Wiedereinschalten)
@@ -38,8 +39,9 @@ Aus der Speicher-Integration werden vier Entitäten benötigt:
 | Ladezustand | `sensor.…_battery_percentage` |
 | Ausgabe-Schalter | `switch.…_time_period_1_enabled` |
 | Ausgabe-Sollwert | `number.…_time_period_1_output_value` |
+| Überschusseinspeisung (optional) | `switch.…_surplus_feed_in` |
 
-Zusammen mit dem Netzleistungssensor sind das fünf Entitäten. Die gemessene Ausgangsleistung wird seit v2.0 **nicht** mehr benötigt.
+Zusammen mit dem Netzleistungssensor sind das fünf Entitäten, mit dem optionalen Schalter für die Überschusseinspeisung sechs. Die gemessene Ausgangsleistung wird seit v2.0 **nicht** mehr benötigt.
 
 ### Vorzeichen des Netzleistungssensors
 
@@ -49,7 +51,11 @@ Zusammen mit dem Netzleistungssensor sind das fünf Entitäten. Die gemessene Au
 
 ### Überschusseinspeisung am Speicher
 
-> Für das Balancing-Fenster muss die **Überschusseinspeisung** (surplus feed-in) in den Geräteeinstellungen eingeschaltet sein. Ist sie aus, kann der Speicher seine Zellen nicht ausgleichen – siehe [Balancing](#balancing-warum-die-regelung-sich-zurückzieht).
+Für das Balancing muss die **Überschusseinspeisung** (surplus feed-in) eingeschaltet sein. Ist sie aus, kann der Speicher seine Zellen nicht ausgleichen – siehe [Balancing](#balancing-warum-die-regelung-sich-zurückzieht).
+
+Dafür gibt es zwei Wege. Entweder die Einstellung bleibt dauerhaft von Hand eingeschaltet, dann bleibt das Feld für den Schalter im Blueprint leer. Oder der Schalter wird angegeben, dann übernimmt die Automation ihn: bei 100 % Ladezustand tagsüber ein, nach Sonnenuntergang und abgeklungener Ladeleistung wieder aus.
+
+> Der zweite Weg hat einen handfesten Vorteil: Bei vollem Akku und eingeschalteter Überschusseinspeisung koppelt der Speicher seine Ausgabe an die Eingangsleistung. Nachts ist die null – der Speicher gäbe also nichts ab, obwohl er voll ist, und das Haus zöge alles aus dem Netz. Das Abschalten nach Sonnenuntergang gibt ihn für die normale Regelung wieder frei.
 
 ### Geglätteter Sensor (empfohlen)
 
@@ -123,6 +129,8 @@ Abschalten (0 W) ist von Wartezeit und Anlaufsperre ausgenommen und erfolgt imme
 | SoC Wiedereinschaltschwelle | `25 %` | Erst hier wird wieder freigegeben |
 | SoC Drosselschwelle (Eco) | `40 %` | Darunter greift die Drosselung |
 | Balancing-Fenster | an | Bei 100 % SoC volle Ausgabe freigeben |
+| Schalter Überschusseinspeisung | leer | Optional; leer = dauerhaft von Hand eingeschaltet lassen |
+| Nachlaufzeit der Überschusseinspeisung | `10 min` | Wartezeit bei ruhender Ladeleistung vor dem Abschalten |
 
 ### Leistungsgrenzen
 
@@ -182,6 +190,10 @@ Das Blueprint setzt deshalb bei 100 % SoC und anliegender Ladeleistung die volle
 
 > **Der Preis:** In diesem Fenster wird ins Netz eingespeist, sobald die PV-Leistung über dem Hausverbrauch liegt. Wer das partout nicht will, schaltet das Balancing-Fenster ab – sollte dem Speicher dann aber auf anderem Weg regelmäßig Zeit bei 100 % Ladezustand verschaffen.
 
+Ist der Schalter für die Überschusseinspeisung hinterlegt, ergibt sich daraus ein Tagesablauf: Sobald der Speicher tagsüber 100 % erreicht, schaltet die Automation die Überschusseinspeisung ein und gibt die volle Ausgabe frei – der Speicher leitet durch und balanciert. Nach Sonnenuntergang, wenn die Ladeleistung für die eingestellte Nachlaufzeit bei null liegt, wird sie wieder ausgeschaltet und die normale Nulleinspeisungs-Regelung übernimmt den Abend und die Nacht.
+
+Die Tag/Nacht-Unterscheidung läuft über `sun.sun`. Sie verhindert, dass die Automation nachts zwischen Ein und Aus pendelt, wenn der Speicher noch bei 100 % steht. Fehlt die Entity, wird durchgehend Tag angenommen und nur noch eingeschaltet.
+
 ### Warum die Drosselung bei genug Ladeleistung entfällt
 
 Der Sparmodus soll den Akku vor dem Leerlaufen schützen. Fließt gerade mehr Ladeleistung hinein, als abgegeben werden soll, wird der Akku netto trotzdem voller – dann gibt es keinen Grund zu drosseln. Verglichen wird deshalb die Ladeleistung gegen die **tatsächlich geplante Ausgabe**, nicht gegen den Bedarf.
@@ -210,6 +222,12 @@ Das kommt vom Totband. Auf 10 W verringern, wenn es enger sein soll – dafür w
 **Die Ausgabe springt zwischen Drosselwert und Vollwert**
 Passiert bei schwankender PV nahe der Umschaltschwelle. Hysterese der Drosselung auf 150–200 W erhöhen.
 
+**Der Speicher gibt bei 100 % SoC nichts ab, obwohl er voll ist**
+Bei eingeschalteter Überschusseinspeisung hängt die Ausgabe an der Eingangsleistung. Ohne PV bleibt sie damit bei null. Entweder den Schalter im Blueprint hinterlegen, dann erledigt das die Automation, oder die Überschusseinspeisung abends von Hand ausschalten.
+
+**Die Überschusseinspeisung wird nie eingeschaltet**
+Die Automation schaltet sie erst bei 100 % Ladezustand ein. Erreicht der Speicher die 100 % nie, passiert auch nichts. In dem Fall die Entladetiefe vorübergehend begrenzen, damit er mittags wirklich voll wird.
+
 **Die Automation regelt gar nicht mehr**
 Die Regelung liest ihre eigene Basis aus der Number-Entity und misst die Wartezeit über deren `last_changed`. Meldet die Integration diese Entity nicht zuverlässig zurück, steht die Regelung. Zum Test die Wartezeiten auf `0` setzen – regelt es dann wieder, liegt es daran.
 
@@ -225,6 +243,12 @@ Perfekte Nulleinspeisung ist mit diesem Aufbau nicht erreichbar. Aus Sensortakt,
 ---
 
 ## Changelog
+
+### v2.1
+
+- Optionale Automatik für die **Überschusseinspeisung**: wird der Schalter hinterlegt, schaltet die Automation ihn bei 100 % Ladezustand tagsüber ein und nach Sonnenuntergang wieder aus
+- Damit steht der volle Speicher nachts wieder für die normale Regelung zur Verfügung, statt seine Ausgabe an die Eingangsleistung zu koppeln
+- Neue Option: Nachlaufzeit vor dem Abschalten
 
 ### v2.0
 

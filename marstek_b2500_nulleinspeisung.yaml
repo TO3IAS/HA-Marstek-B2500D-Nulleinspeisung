@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.0 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.1 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -20,7 +20,9 @@ blueprint:
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
     Einspeisung sein. Fuer das Balancing muss die Ueberschusseinspeisung am
-    Speicher eingeschaltet sein.
+    Speicher eingeschaltet sein - entweder dauerhaft von Hand, oder automatisch
+    ueber den optionalen Schalter, den dieses Blueprint tagsueber ein- und nach
+    Sonnenuntergang wieder ausschaltet.
   domain: automation
   source_url: https://github.com/TO3IAS/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
   homeassistant:
@@ -187,6 +189,34 @@ blueprint:
           default: true
           selector:
             boolean:
+        surplus_switch:
+          name: Schalter Überschusseinspeisung (optional)
+          description: >-
+            Wird hier der Schalter der Überschusseinspeisung angegeben, schaltet
+            die Automation ihn bei 100 % Ladezustand tagsüber ein und nach
+            Sonnenuntergang wieder aus. Damit balanciert der Speicher am Tag und
+            steht nachts trotzdem für die normale Regelung zur Verfügung – bei
+            vollem Akku und eingeschalteter Überschusseinspeisung hängt seine
+            Ausgabe sonst an der Eingangsleistung und er gibt nachts nichts ab.
+            Leer lassen, wenn die Überschusseinspeisung dauerhaft von Hand
+            eingeschaltet bleiben soll.
+          default: []
+          selector:
+            entity:
+              domain: switch
+              multiple: true
+        surplus_nachlauf:
+          name: Nachlaufzeit der Überschusseinspeisung
+          description: >-
+            So lange muss die Ladeleistung nach Sonnenuntergang bei null liegen,
+            bevor die Überschusseinspeisung wieder ausgeschaltet wird.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 120
+              unit_of_measurement: "min"
+              mode: box
 
     leistung:
       name: Leistungsgrenzen
@@ -291,6 +321,7 @@ actions:
       e_soc: !input speicher_soc_sensor
       e_switch: !input speicher_switch
       e_number: !input speicher_watt_number
+      e_surplus: !input surplus_switch
       soc_trigger_aktiv: !input soc_trigger
 
   # SoC-Trigger nur auswerten, wenn in den Optionen aktiviert
@@ -317,6 +348,7 @@ actions:
       drossel_watt_v: !input drossel_watt
       hw_min_watt_v: !input hw_min_watt
       drossel_hyst_v: !input drossel_hysterese
+      surplus_nachlauf_v: !input surplus_nachlauf
       max_alter_v: !input max_sensor_alter
       # Netzwert gueltig? Eingefrorene Werte zaehlen nicht als gueltig, denn bei
       # aktivem Keep-last-sample wird der Sensor nie unavailable.
@@ -337,6 +369,21 @@ actions:
       # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
       # das BMS waehrend der Ueberschusseinspeisung balancieren kann.
       balancing: "{{ balancing_aktiv_v and soc >= 100 and speicher_in > 0 }}"
+      # Optionale Steuerung der Ueberschusseinspeisung.
+      # Tag/Nacht ueber sun.sun; fehlt die Entity, gilt es als Tag.
+      surplus_da: "{{ e_surplus | count > 0 }}"
+      surplus_status: >-
+        {{ states(e_surplus[0]) if surplus_da else 'none' }}
+      ist_nacht: "{{ states('sun.sun') == 'below_horizon' }}"
+      # Sekunden, seit die Ladeleistung zuletzt einen anderen Wert hatte
+      laden_ruht: >-
+        {{ speicher_in < 10
+           and (now() - states[e_in].last_changed).total_seconds()
+               >= surplus_nachlauf_v | float(0) * 60 }}
+      surplus_ein: >-
+        {{ surplus_da and surplus_status == 'off' and soc >= 100 and not ist_nacht }}
+      surplus_aus: >-
+        {{ surplus_da and surplus_status == 'on' and ist_nacht and laden_ruht }}
       ziel_leistung: >
         {# 0. Kein gueltiger Netzwert -> abschalten statt blind weiterregeln #}
         {% if not netz_ok %}
@@ -371,6 +418,27 @@ actions:
         {% if z == 0 %}0
         {% elif z < basis %}{{ wartezeit_runter_v }}
         {% else %}{{ wartezeit_hoch_v }}{% endif %}
+
+  # Ueberschusseinspeisung tagsueber freigeben, damit der volle Speicher
+  # balancieren kann. Laeuft vor den Regelbedingungen, damit ein Abbruch der
+  # Regelung diese Umschaltung nicht verhindert.
+  - if:
+      - condition: template
+        value_template: "{{ surplus_ein }}"
+    then:
+      - action: switch.turn_on
+        target:
+          entity_id: !input surplus_switch
+
+  # Nach Sonnenuntergang und abgeklungener Ladeleistung wieder abschalten,
+  # damit der Speicher nachts normal entladen werden kann.
+  - if:
+      - condition: template
+        value_template: "{{ surplus_aus }}"
+    then:
+      - action: switch.turn_off
+        target:
+          entity_id: !input surplus_switch
 
   # Totband: kleine Sollwertaenderungen gar nicht erst schreiben
   - condition: template
