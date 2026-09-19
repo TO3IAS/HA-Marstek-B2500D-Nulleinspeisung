@@ -1,27 +1,26 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis eines
-    Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel Leistung ab,
-    wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
+    v2.0 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
+    Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
 
-    Die Regelung ist gedaempft ausgelegt: pro Schritt wird nur ein Teil der
-    gemessenen Abweichung ausgeregelt, und zwischen zwei Sollwertaenderungen
-    liegt eine Mindestwartezeit. Das verhindert das Aufschaukeln, das entsteht,
-    weil Sensoren und Speicher die Wirkung einer Korrektur erst mit Verzoegerung
-    zurueckmelden.
+    Die Regelung arbeitet inkrementell: Basis ist der zuletzt gesetzte Sollwert,
+    auf den pro Schritt nur ein Teil der gemessenen Abweichung addiert wird. Das
+    haelt die traege Rueckmeldung von Sensoren und Speicher aus der Regelschleife
+    heraus und verhindert Aufschaukeln.
 
 
-    Enthalten: SoC-Hysterese gegen Tiefentladung, Drosselung auf einen festen
-    Sparwert bei niedrigem Akkustand oder Lastspitzen (nur wenn die Ladeleistung
-    die geplante Ausgabe nicht traegt, mit eigener Hysterese), Hardware-
-    Mindestleistung, Totband und Schutz gegen unverfuegbare Sensoren.
+    Enthalten: Balancing-Fenster bei vollem Speicher, Watchdog gegen eingefrorene
+    Messwerte, Anlaufsperre nach dem Einschalten, SoC-Hysterese gegen
+    Tiefentladung, Drosselung auf einen Sparwert bei niedrigem Akkustand oder
+    Lastspitzen, Hardware-Mindestleistung und Totband.
 
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
-    Einspeisung sein. Empfohlen wird ein leicht geglaetteter Sensor
-    (Statistik-Helfer, Median, Fenster ca. 15 s).
+    Einspeisung sein. Fuer das Balancing muss die Ueberschusseinspeisung am
+    Speicher eingeschaltet sein.
   domain: automation
   source_url: https://github.com/TO3IAS/HA-Marstek-B2500D-Nulleinspeisung/blob/main/marstek_b2500_nulleinspeisung.yaml
   homeassistant:
@@ -40,17 +39,11 @@ blueprint:
           selector:
             entity:
               domain: sensor
-        speicher_output_sensor:
-          name: Speicher-Ausgangsleistung
-          description: Aktuell vom Speicher abgegebene Leistung in Watt.
-          selector:
-            entity:
-              domain: sensor
         speicher_input_sensor:
           name: Speicher-Ladeleistung
           description: >-
             Aktuell in den Speicher fließende Ladeleistung in Watt (z. B. von PV).
-            Hebt die Drosselung auf, wenn genug nachgeladen wird.
+            Steuert Drosselung und Balancing-Fenster.
           selector:
             entity:
               domain: sensor
@@ -69,8 +62,8 @@ blueprint:
         speicher_watt_number:
           name: Ausgabe-Sollwert (Time Period)
           description: >-
-            Number-Entity, über die der Watt-Sollwert gesetzt wird. Deren
-            Änderungszeitpunkt dient zugleich als Basis für die Wartezeiten.
+            Number-Entity, über die der Watt-Sollwert gesetzt wird. Ihr Wert ist
+            zugleich die Basis der Regelung und der Zeitgeber für die Wartezeiten.
           selector:
             entity:
               domain: number
@@ -83,9 +76,8 @@ blueprint:
         kp:
           name: Regelverstärkung (Kp)
           description: >-
-            Anteil der gemessenen Abweichung, der pro Schritt ausgeregelt wird.
-            1.0 korrigiert den vollen Fehler sofort und neigt zum Überschwingen.
-            Bei Schwingen verringern, bei trägem Verhalten erhöhen.
+            Anteil der gemessenen Abweichung, der pro Schritt auf den Sollwert
+            addiert wird. Bei Schwingen verringern, bei trägem Verhalten erhöhen.
           default: 0.6
           selector:
             number:
@@ -96,9 +88,10 @@ blueprint:
         totband_watt:
           name: Totband
           description: >-
-            Mindestabweichung zwischen aktueller Abgabe und Zielwert, damit
-            überhaupt nachgeregelt wird.
-          default: 25
+            Mindestabweichung zwischen altem und neuem Sollwert, damit überhaupt
+            geschrieben wird. Wirkt geteilt durch Kp auf den Netzbezug: 15 W bei
+            Kp 0,6 entspricht rund 25 W Toleranz am Netzanschluss.
+          default: 15
           selector:
             number:
               min: 0
@@ -127,6 +120,19 @@ blueprint:
             number:
               min: 0
               max: 300
+              unit_of_measurement: "s"
+              mode: box
+        anlaufsperre:
+          name: Anlaufsperre nach dem Einschalten
+          description: >-
+            Nach dem Einschalten braucht der Speicher ein bis zwei Minuten, bis er
+            Leistung liefert. Solange wird nicht nachgeregelt, sonst schaukelt
+            sich der Sollwert hoch. Abschalten bleibt jederzeit möglich.
+          default: 120
+          selector:
+            number:
+              min: 0
+              max: 600
               unit_of_measurement: "s"
               mode: box
 
@@ -169,6 +175,18 @@ blueprint:
               max: 100
               unit_of_measurement: "%"
               mode: slider
+        balancing_aktiv:
+          name: Balancing-Fenster
+          description: >-
+            Bei 100 % Ladezustand und anliegender Ladeleistung zieht sich die
+            Regelung zurück und setzt die volle Ausgabeleistung, damit der
+            Speicher die Energie ungehindert durchleiten und dabei seine Zellen
+            balancieren kann. Dazu muss die Überschusseinspeisung am Gerät
+            eingeschaltet sein. In diesem Fenster wird ins Netz eingespeist,
+            sobald die PV-Leistung über dem Hausverbrauch liegt.
+          default: true
+          selector:
+            boolean:
 
     leistung:
       name: Leistungsgrenzen
@@ -177,7 +195,7 @@ blueprint:
       input:
         max_watt:
           name: Maximale Ausgabeleistung
-          description: Obergrenze der Ausgabe im Normalbetrieb.
+          description: Obergrenze der Ausgabe im Normalbetrieb und im Balancing-Fenster.
           default: 800
           selector:
             number:
@@ -231,8 +249,8 @@ blueprint:
         max_sensor_alter:
           name: Maximales Alter des Netzwerts
           description: >-
-            Ist der Netzleistungssensor länger nicht aktualisiert worden, wird
-            nicht geregelt. Schützt vor eingefrorenen Werten, etwa bei einer
+            Ist der Netzleistungssensor länger nicht aktualisiert worden, wird die
+            Ausgabe abgeschaltet. Schützt vor eingefrorenen Werten, etwa bei einer
             Störung der Powerfox-Cloud. 0 deaktiviert die Prüfung.
           default: 120
           selector:
@@ -258,96 +276,118 @@ triggers:
   - trigger: state
     entity_id: !input speicher_soc_sensor
     id: soc
+  # Watchdog: laeuft auch dann, wenn gar keine Sensorwerte mehr eintreffen.
+  # Ohne ihn koennte die Alterspruefung nie greifen.
+  - trigger: time_pattern
+    minutes: /1
+    id: watchdog
 
 conditions: []
 
 actions:
   - variables:
       e_grid: !input grid_power_sensor
-      e_out: !input speicher_output_sensor
       e_in: !input speicher_input_sensor
       e_soc: !input speicher_soc_sensor
       e_switch: !input speicher_switch
       e_number: !input speicher_watt_number
       soc_trigger_aktiv: !input soc_trigger
-      max_alter_v: !input max_sensor_alter
 
   # SoC-Trigger nur auswerten, wenn in den Optionen aktiviert
   - condition: template
     value_template: >-
       {{ trigger.id is not defined or trigger.id != 'soc' or soc_trigger_aktiv }}
 
-  # Abbruch, wenn ein benoetigter Sensor keinen gueltigen Wert liefert.
-  # Sonst wuerde float(0) z. B. einen SoC von 0 % vortaeuschen.
+  # Ohne gueltige Speicherwerte laesst sich nichts sinnvoll entscheiden.
+  # Der Netzsensor wird spaeter geprueft und fuehrt zum Abschalten statt Abbruch.
   - condition: template
-    value_template: >-
-      {{ has_value(e_grid) and has_value(e_out)
-         and has_value(e_in) and has_value(e_soc) }}
-
-  # Abbruch bei eingefrorenem Netzwert (Keep-last-sample haelt den alten Wert,
-  # der Sensor wird dabei nicht unavailable)
-  - condition: template
-    value_template: >-
-      {{ max_alter_v | float(0) == 0
-         or (now() - states[e_grid].last_updated).total_seconds() < max_alter_v | float(0) }}
+    value_template: "{{ has_value(e_in) and has_value(e_soc) }}"
 
   - variables:
-      grid_p: "{{ states(e_grid) | float(0) }}"
-      speicher_out: "{{ states(e_out) | float(0) }}"
-      speicher_in: "{{ states(e_in) | float(0) }}"
-      soc: "{{ states(e_soc) | float(0) }}"
-      switch_status: "{{ states(e_switch) }}"
       kp_v: !input kp
       totband_v: !input totband_watt
       wartezeit_hoch_v: !input wartezeit_hoch
       wartezeit_runter_v: !input wartezeit_runter
+      anlaufsperre_v: !input anlaufsperre
       soc_off_v: !input soc_off
       soc_on_v: !input soc_on
       soc_drossel_v: !input soc_drossel
+      balancing_aktiv_v: !input balancing_aktiv
       max_watt_v: !input max_watt
       drossel_watt_v: !input drossel_watt
       hw_min_watt_v: !input hw_min_watt
       drossel_hyst_v: !input drossel_hysterese
-      # Gedaempfte Korrektur: nur der Anteil kp der Abweichung wird ausgeregelt
-      sollwert: "{{ speicher_out + grid_p * kp_v }}"
+      max_alter_v: !input max_sensor_alter
+      # Netzwert gueltig? Eingefrorene Werte zaehlen nicht als gueltig, denn bei
+      # aktivem Keep-last-sample wird der Sensor nie unavailable.
+      netz_ok: >-
+        {{ has_value(e_grid)
+           and (max_alter_v | float(0) == 0
+                or (now() - states[e_grid].last_updated).total_seconds()
+                    < max_alter_v | float(0)) }}
+      grid_p: "{{ states(e_grid) | float(0) }}"
+      speicher_in: "{{ states(e_in) | float(0) }}"
+      soc: "{{ states(e_soc) | float(0) }}"
+      switch_status: "{{ states(e_switch) }}"
+      # Regelbasis ist der zuletzt gesetzte Sollwert, nicht die traege gemessene
+      # Ausgabe. Bei ausgeschaltetem Speicher ist die reale Abgabe null.
+      basis: "{{ 0 if switch_status != 'on' else states(e_number) | float(0) }}"
+      sollwert: "{{ basis + grid_p * kp_v }}"
       wunsch: "{{ [sollwert | float(0), max_watt_v] | min }}"
+      # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
+      # das BMS waehrend der Ueberschusseinspeisung balancieren kann.
+      balancing: "{{ balancing_aktiv_v and soc >= 100 and speicher_in > 0 }}"
       ziel_leistung: >
-        {# 1. Tiefentladeschutz mit Hysterese #}
-        {% if soc <= soc_off_v %}
+        {# 0. Kein gueltiger Netzwert -> abschalten statt blind weiterregeln #}
+        {% if not netz_ok %}
           0
-        {% elif soc < soc_on_v and speicher_out == 0 %}
+        {# 1. Balancing-Fenster: volle Ausgabe freigeben #}
+        {% elif balancing %}
+          {{ max_watt_v }}
+        {# 2. Tiefentladeschutz mit Hysterese #}
+        {% elif soc <= soc_off_v %}
           0
-        {# 2. Hardware-Limit: zu kleiner Bedarf oder Ueberschuss -> aus #}
+        {% elif soc < soc_on_v and switch_status != 'on' %}
+          0
+        {# 3. Hardware-Limit: zu kleiner Bedarf oder Ueberschuss -> aus #}
         {% elif sollwert < hw_min_watt_v %}
           0
-        {# 3. Drossel-Regel bei niedrigem Akku oder Lastspitze, aber nur wenn die
+        {# 4. Drossel-Regel bei niedrigem Akku oder Lastspitze, aber nur wenn die
         Ladeleistung die geplante Ausgabe nicht traegt. Aus der Drosselung heraus
         braucht es zusaetzlich die Hysterese, damit es nicht hin- und herspringt #}
         {% elif (soc < soc_drossel_v or sollwert > max_watt_v)
                 and wunsch > drossel_watt_v
-                and speicher_in < wunsch + (drossel_hyst_v if speicher_out <= drossel_watt_v + 20 else 0) %}
+                and speicher_in < wunsch + (drossel_hyst_v if basis <= drossel_watt_v + 20 else 0) %}
           {{ drossel_watt_v }}
-        {# 4. Normalbetrieb #}
+        {# 5. Normalbetrieb #}
         {% else %}
           {{ wunsch | round(0) }}
         {% endif %}
-      # Sekunden seit der letzten tatsaechlichen Sollwertaenderung
       seit_aenderung: >-
         {{ (now() - states[e_number].last_changed).total_seconds() }}
       # Abschalten sofort, Reduzieren zuegig, Erhoehen erst nach Einschwingen
       wartezeit: >-
         {% set z = ziel_leistung | float(0) %}
         {% if z == 0 %}0
-        {% elif z < speicher_out %}{{ wartezeit_runter_v }}
+        {% elif z < basis %}{{ wartezeit_runter_v }}
         {% else %}{{ wartezeit_hoch_v }}{% endif %}
 
-  # Totband: kleine Abweichungen ignorieren
+  # Totband: kleine Sollwertaenderungen gar nicht erst schreiben
   - condition: template
-    value_template: "{{ (ziel_leistung | float(0) - speicher_out) | abs >= totband_v }}"
+    value_template: "{{ (ziel_leistung | float(0) - basis) | abs >= totband_v }}"
 
   # Mindestabstand zwischen Sollwertaenderungen
   - condition: template
     value_template: "{{ seit_aenderung | float(0) >= wartezeit | float(999) }}"
+
+  # Anlaufsperre: waehrend der Speicher hochfaehrt nicht nachregeln.
+  # Abschalten bleibt erlaubt.
+  - condition: template
+    value_template: >-
+      {{ ziel_leistung | float(0) == 0
+         or switch_status != 'on'
+         or (now() - states[e_switch].last_changed).total_seconds()
+             >= anlaufsperre_v | float(0) }}
 
   - choose:
       # 0 W gewuenscht -> Ausgabe abschalten (nur falls nicht schon aus)

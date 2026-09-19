@@ -2,21 +2,25 @@
 
 Home-Assistant-Blueprint zur dynamischen Regelung eines Marstek B2500 Balkonkraftwerk-Speichers. Der Speicher gibt nur so viel Leistung ab, wie das Haus gerade aus dem Netz bezieht – Ziel ist ein Netzbezug nahe null, ohne dabei ins Netz einzuspeisen.
 
-Die Regelung ist bewusst **gedämpft** ausgelegt. Zwischen einer Sollwertänderung und dem Zeitpunkt, an dem die Sensoren deren Wirkung zurückmelden, vergehen je nach Aufbau 10–20 Sekunden. Wer in dieser Zeit mehrfach den vollen Fehler nachregelt, erzeugt Schwingungen. Dieses Blueprint korrigiert deshalb pro Schritt nur einen Teil der Abweichung und hält Mindestwartezeiten zwischen Sollwertänderungen ein.
+Die Regelung arbeitet **inkrementell**: Basis ist der zuletzt gesetzte Sollwert, auf den pro Schritt nur ein Teil der gemessenen Abweichung addiert wird. Das hält die träge Rückmeldung von Sensoren und Speicher aus der Regelschleife heraus – der häufigste Grund dafür, dass selbstgebaute Nulleinspeisungen zwischen Einspeisung und Netzbezug hin- und herschwingen.
+
+Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B2500 kann seine Zellen nur balancieren, wenn er bei vollem Akku Energie ungehindert durchleiten darf. Eine gut funktionierende Nulleinspeisung verhindert genau das. Dieses Blueprint zieht sich deshalb bei 100 % Ladezustand bewusst zurück.
 
 ---
 
 ## Funktionen
 
 - Nulleinspeisungs-Regelung auf Basis eines Netzleistungssensors
-- Gedämpfter P-Regler mit einstellbarer Verstärkung (Kp) und Totband
+- Inkrementeller Regler mit einstellbarer Verstärkung (Kp) und Totband
 - Asymmetrische Wartezeiten: schnell reduzieren, langsam erhöhen
+- **Balancing-Fenster** bei vollem Speicher, damit das BMS die Zellen ausgleichen kann
+- **Anlaufsperre**, weil der Speicher nach dem Einschalten ein bis zwei Minuten braucht
+- **Watchdog** gegen eingefrorene Messwerte, unabhängig von eintreffenden Sensordaten
 - Tiefentladeschutz mit SoC-Hysterese (Abschalten / Wiedereinschalten)
 - Sparmodus: Drosselung auf einen festen Wert bei niedrigem Akkustand
 - Lastspitzen-Drosselung, statt sinnlos gegen den Wasserkocher anzuregeln
-- Drosselung wird aufgehoben, wenn die PV-Ladeleistung die Ausgabe ohnehin trägt (mit eigener Hysterese)
-- Hardware-Mindestleistung: unterhalb davon wird sauber abgeschaltet statt unrealistische Werte zu senden
-- Schutz vor unverfügbaren **und** eingefrorenen Sensorwerten
+- Drosselung wird aufgehoben, wenn die PV-Ladeleistung die Ausgabe ohnehin trägt
+- Hardware-Mindestleistung: unterhalb davon wird sauber abgeschaltet
 
 ---
 
@@ -30,17 +34,22 @@ Aus der Speicher-Integration werden vier Entitäten benötigt:
 
 | Typ | Beispiel (hm2mqtt) |
 | --- | --- |
-| Ausgangsleistung | `sensor.…_total_output_power` |
 | Ladeleistung | `sensor.…_total_input_power` |
 | Ladezustand | `sensor.…_battery_percentage` |
 | Ausgabe-Schalter | `switch.…_time_period_1_enabled` |
 | Ausgabe-Sollwert | `number.…_time_period_1_output_value` |
+
+Zusammen mit dem Netzleistungssensor sind das fünf Entitäten. Die gemessene Ausgangsleistung wird seit v2.0 **nicht** mehr benötigt.
 
 ### Vorzeichen des Netzleistungssensors
 
 > **Wichtig:** Der Sensor muss **positiv bei Netzbezug** und **negativ bei Einspeisung** sein.
 >
 > Ist es umgekehrt, regelt die Automation in die falsche Richtung: Bei PV-Überschuss würde die Ausgabe hochgefahren statt gedrosselt. Vor dem Scharfschalten einmal prüfen, während PV-Überschuss anliegt.
+
+### Überschusseinspeisung am Speicher
+
+> Für das Balancing-Fenster muss die **Überschusseinspeisung** (surplus feed-in) in den Geräteeinstellungen eingeschaltet sein. Ist sie aus, kann der Speicher seine Zellen nicht ausgleichen – siehe [Balancing](#balancing-warum-die-regelung-sich-zurückzieht).
 
 ### Geglätteter Sensor (empfohlen)
 
@@ -60,7 +69,7 @@ Der Median ignoriert einzelne Ausreißer vollständig – anders als der Mittelw
 
 Größere Fenster glätten besser, kosten aber Reaktionszeit: Der Median hinkt der Realität etwa ein halbes Fenster hinterher.
 
-> Bei aktivem *Keep last sample* wird der Sensor bei einer Störung der Datenquelle **nicht** `unavailable`, sondern friert auf dem letzten Wert ein. Das Blueprint fängt das über die Option *Maximales Alter des Netzwerts* ab.
+> Bei aktivem *Keep last sample* wird der Sensor bei einer Störung der Datenquelle **nicht** `unavailable`, sondern friert auf dem letzten Wert ein. Genau dafür gibt es den Watchdog.
 
 ---
 
@@ -92,18 +101,19 @@ Die Datei `marstek_b2500_nulleinspeisung.yaml` nach `config/blueprints/automatio
 
 ### Entitäten
 
-Die sechs oben genannten Entitäten auswählen. Als Netzleistungssensor den geglätteten Helfer angeben, nicht den rohen Sensor.
+Die fünf oben genannten Entitäten auswählen. Als Netzleistungssensor den geglätteten Helfer angeben, nicht den rohen Sensor.
 
 ### Regelverhalten
 
 | Option | Standard | Bedeutung |
 | --- | --- | --- |
-| Regelverstärkung (Kp) | `0.6` | Anteil der Abweichung, der pro Schritt ausgeregelt wird |
-| Totband | `25 W` | Kleinere Abweichungen werden ignoriert |
+| Regelverstärkung (Kp) | `0.6` | Anteil der Abweichung, der pro Schritt auf den Sollwert addiert wird |
+| Totband | `15 W` | Kleinere Sollwertänderungen werden nicht geschrieben |
 | Wartezeit beim Erhöhen | `20 s` | Mindestabstand, bevor der Sollwert steigt |
 | Wartezeit beim Reduzieren | `8 s` | Mindestabstand, bevor der Sollwert sinkt |
+| Anlaufsperre | `120 s` | Nach dem Einschalten nicht nachregeln |
 
-Abschalten (0 W) ist von der Wartezeit ausgenommen und erfolgt immer sofort.
+Abschalten (0 W) ist von Wartezeit und Anlaufsperre ausgenommen und erfolgt immer sofort.
 
 ### Akku-Schutz
 
@@ -112,12 +122,13 @@ Abschalten (0 W) ist von der Wartezeit ausgenommen und erfolgt immer sofort.
 | SoC Abschaltschwelle | `15 %` | Darunter wird die Ausgabe gesperrt |
 | SoC Wiedereinschaltschwelle | `25 %` | Erst hier wird wieder freigegeben |
 | SoC Drosselschwelle (Eco) | `40 %` | Darunter greift die Drosselung |
+| Balancing-Fenster | an | Bei 100 % SoC volle Ausgabe freigeben |
 
 ### Leistungsgrenzen
 
 | Option | Standard | Bedeutung |
 | --- | --- | --- |
-| Maximale Ausgabeleistung | `800 W` | Obergrenze im Normalbetrieb |
+| Maximale Ausgabeleistung | `800 W` | Obergrenze im Normalbetrieb und beim Balancing |
 | Gedrosselte Ausgabeleistung | `200 W` | Fester Wert bei Drosselung |
 | Hardware-Mindestleistung | `80 W` | Darunter wird abgeschaltet |
 | Hysterese der Drosselung | `100 W` | Zusatzbedarf, um die Drosselung zu verlassen |
@@ -128,30 +139,48 @@ Abschalten (0 W) ist von der Wartezeit ausgenommen und erfolgt immer sofort.
 
 | Option | Standard | Bedeutung |
 | --- | --- | --- |
-| Maximales Alter des Netzwerts | `120 s` | Schutz vor eingefrorenen Werten, `0` deaktiviert die Prüfung |
+| Maximales Alter des Netzwerts | `120 s` | Watchdog, `0` deaktiviert die Prüfung |
 | Zusätzlicher SoC-Trigger | an | Reagiert sofort auf Schwellwerte statt erst beim nächsten Netz-Update |
 
 ---
 
 ## Funktionsweise
 
-Der Zielwert entsteht aus der aktuellen Ausgabe plus dem gedämpften Netzbezug:
+Der neue Sollwert entsteht aus dem **zuletzt gesetzten** Sollwert plus einem Anteil des gemessenen Netzbezugs:
 
 ```
-sollwert = ausgangsleistung + (netzleistung × Kp)
+neuer_sollwert = alter_sollwert + (netzleistung × Kp)
 ```
+
+Weil jeder Schritt auf dem vorherigen aufbaut, baut die Regelung den Restfehler über mehrere Durchläufe vollständig ab. Es bleibt keine dauerhafte Abweichung übrig – was stehen bleibt, kommt allein vom Totband. Deshalb wirkt das Totband geteilt durch Kp auf den Netzbezug: 15 W bei Kp 0,6 entsprechen rund 25 W Toleranz am Netzanschluss.
+
+Ist der Ausgabe-Schalter aus, gilt als Basis 0 W, weil dann real nichts abgegeben wird.
 
 Anschließend läuft eine Kaskade von oben nach unten – die erste zutreffende Regel gewinnt:
 
 | Stufe | Bedingung | Ergebnis |
 | --- | --- | --- |
-| 1 | SoC ≤ Abschaltschwelle | 0 W, Switch aus |
-| 1 | SoC < Wiedereinschaltschwelle **und** Ausgabe steht auf 0 | bleibt 0 W |
-| 2 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus |
-| 3 | (SoC < Drosselschwelle **oder** Sollwert > Maximum) **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
-| 4 | alles andere | Sollwert, gedeckelt auf das Maximum |
+| 0 | Netzwert ungültig oder zu alt | 0 W, Switch aus |
+| 1 | SoC = 100 % **und** Ladeleistung liegt an | volle Ausgabe (Balancing) |
+| 2 | SoC ≤ Abschaltschwelle | 0 W, Switch aus |
+| 2 | SoC < Wiedereinschaltschwelle **und** Ausgabe ist aus | bleibt aus |
+| 3 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus |
+| 4 | (SoC < Drosselschwelle **oder** Sollwert > Maximum) **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
+| 5 | alles andere | Sollwert, gedeckelt auf das Maximum |
 
-Danach greifen noch Totband und Wartezeit. Der Switch wird nur bei echtem Zustandswechsel geschaltet, und der Watt-Wert wird **vor** dem Einschalten gesetzt, damit der Speicher beim Anlaufen nie kurz einen veralteten Wert ausgibt.
+Danach greifen Totband, Wartezeit und Anlaufsperre. Der Switch wird nur bei echtem Zustandswechsel geschaltet, und der Watt-Wert wird **vor** dem Einschalten gesetzt, damit der Speicher beim Anlaufen nie kurz einen veralteten Wert ausgibt.
+
+### Balancing: warum die Regelung sich zurückzieht
+
+Der B2500 gleicht seine Zellspannungen ausschließlich während der Überschusseinspeisung aus, und zwar passiv, indem er die vollsten Zellen entlädt. Das braucht Zeit und setzt voraus, dass der Speicher bei 100 % Ladezustand die ankommende Energie ungehindert durchleiten darf.
+
+Genau hier liegt der Konflikt: Eine Nulleinspeisungs-Regelung deckelt die Ausgabe auf den Hausverbrauch. Liefert die PV 700 W, das Haus braucht aber nur 200 W, wird nichts durchgeleitet – und das Balancing kommt nicht in Gang. Je besser die Regelung funktioniert, desto weniger balanciert der Speicher.
+
+Driften die Zellen auseinander, diktiert beim Laden die vollste Zelle das Ende des Ladevorgangs und beim Entladen die schwächste. Der Kapazitätsverlust summiert sich über Monate und lässt sich nicht mehr zurückholen, ohne dass wieder balanciert wird.
+
+Das Blueprint setzt deshalb bei 100 % SoC und anliegender Ladeleistung die volle Ausgabeleistung und überlässt dem Gerät das Feld. Da die Ausgabe bei aktiver Überschusseinspeisung ohnehin an der Eingangsleistung hängt, entlädt sich der Speicher dabei nicht – er gibt nur weiter, was die Module liefern.
+
+> **Der Preis:** In diesem Fenster wird ins Netz eingespeist, sobald die PV-Leistung über dem Hausverbrauch liegt. Wer das partout nicht will, schaltet das Balancing-Fenster ab – sollte dem Speicher dann aber auf anderem Weg regelmäßig Zeit bei 100 % Ladezustand verschaffen.
 
 ### Warum die Drosselung bei genug Ladeleistung entfällt
 
@@ -169,26 +198,48 @@ Beispiel bei 35 % SoC, Bedarf 1500 W:
 
 ## Feintuning in der Praxis
 
-**Die Ausgabe schwingt, der Netzbezug pendelt zwischen −200 und +200 W**
-Kp verringern, zuerst auf `0.4`. Hilft das nicht, die Wartezeit beim Erhöhen auf 30 s anheben. Erst danach am Totband drehen.
+**Die Ausgabe schwingt, der Netzbezug pendelt in beide Richtungen**
+Kp verringern, zuerst auf `0.4`. Hilft das nicht, die Wartezeit beim Erhöhen auf 30 s anheben.
 
-**Es bleibt dauerhaft ein Netzbezug von 50–80 W stehen**
-Das ist das normale Verhalten eines P-Reglers und die günstigere Seite des Fehlers. Wer es enger will: Kp auf `0.8` und Totband auf `15 W`.
+**Nach dem Einschalten springt die Ausgabe auf Maximum und speist kurz ein**
+Die Anlaufsperre ist zu kurz. Beobachten, wie lange der Speicher nach dem Einschalten tatsächlich braucht, und den Wert entsprechend erhöhen.
+
+**Es bleibt ein konstanter Netzbezug stehen**
+Das kommt vom Totband. Auf 10 W verringern, wenn es enger sein soll – dafür werden häufiger Sollwerte geschrieben.
 
 **Die Ausgabe springt zwischen Drosselwert und Vollwert**
 Passiert bei schwankender PV nahe der Umschaltschwelle. Hysterese der Drosselung auf 150–200 W erhöhen.
 
 **Die Automation regelt gar nicht mehr**
-Die Wartezeiten messen über `last_changed` der Number-Entity. Meldet die Integration diese Entity nicht zuverlässig zurück, blockiert die Wartezeit dauerhaft. Zum Test beide Wartezeiten auf `0` setzen – regelt es dann wieder, liegt es daran.
+Die Regelung liest ihre eigene Basis aus der Number-Entity und misst die Wartezeit über deren `last_changed`. Meldet die Integration diese Entity nicht zuverlässig zurück, steht die Regelung. Zum Test die Wartezeiten auf `0` setzen – regelt es dann wieder, liegt es daran.
 
 **Die Automation läuft, tut aber nichts**
-In den Traces prüfen, an welcher Bedingung sie abbricht. Häufigste Ursachen: Totband nicht überschritten, Wartezeit noch nicht abgelaufen, oder ein Sensor liefert `unavailable`.
+In den Traces prüfen, an welcher Bedingung sie abbricht. Häufigste Ursachen: Totband nicht überschritten, Wartezeit oder Anlaufsperre noch nicht abgelaufen, oder ein Sensor liefert `unavailable`.
 
 ---
 
 ## Grenzen
 
 Perfekte Nulleinspeisung ist mit diesem Aufbau nicht erreichbar. Aus Sensortakt, Glättung und Reaktionszeit des Speichers ergibt sich eine Gesamtverzögerung von typischerweise 15–20 Sekunden, bis eine Laständerung vollständig ausgeregelt ist. Bei jedem Ein- und Ausschalten größerer Verbraucher entsteht in dieser Zeit unvermeidlich Netzbezug oder Einspeisung. Das liegt an der Kette aus Messung und Hardware, nicht an der Regelung.
+
+---
+
+## Changelog
+
+### v2.0
+
+- **Balancing-Fenster:** Bei 100 % SoC und anliegender Ladeleistung wird die volle Ausgabe freigegeben, damit das BMS die Zellen ausgleichen kann
+- **Anlaufsperre:** Nach dem Einschalten wird für eine einstellbare Zeit nicht nachgeregelt
+- **Watchdog:** Ein zusätzlicher Minuten-Trigger sorgt dafür, dass die Altersprüfung des Netzwerts auch dann greift, wenn gar keine Sensorwerte mehr eintreffen. Bisher konnte sie das nicht, weil die Automation ohne Sensoränderung nie lief
+- Bei ungültigem oder veraltetem Netzwert wird jetzt **abgeschaltet** statt nur abgebrochen
+- Regelbasis ist der zuletzt gesetzte Sollwert statt der gemessenen Ausgangsleistung – die Sensorverzögerung fällt damit aus der Regelschleife
+- Der Sensor für die Ausgangsleistung wird nicht mehr benötigt
+- Erkennung „Ausgabe ist aus" über den Schalterzustand statt über eine Ausgangsleistung von 0 W
+- Totband-Vorgabe von 25 W auf 15 W gesenkt
+
+### v1.0
+
+- Erstveröffentlichung
 
 ---
 
