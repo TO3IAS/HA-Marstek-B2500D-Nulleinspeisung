@@ -196,6 +196,31 @@ blueprint:
             entity:
               domain: input_boolean
               multiple: true
+        pv_durchleitung:
+          name: PV-Durchleitung trotz SoC-Sperre
+          description: >-
+            Gibt während der SoC-Sperre (zwischen Abschalt- und
+            Wiedereinschaltschwelle) Leistung ab, solange so viel PV-Leistung in
+            den Speicher fließt, dass er trotzdem mindestens um die Reserve
+            geladen wird. Die Sperre selbst bleibt bestehen. Wirkt nur mit
+            hinterlegtem Merker SoC-Sperre. Unterhalb der Abschaltschwelle
+            bleibt die Ausgabe immer aus.
+          default: false
+          selector:
+            boolean:
+        pv_reserve:
+          name: Reserve der PV-Durchleitung
+          description: >-
+            Ladeleistung, die während der PV-Durchleitung mindestens im Akku
+            ankommen soll. Die Ausgabe wird auf Ladeleistung minus Reserve
+            begrenzt.
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 500
+              unit_of_measurement: "W"
+              mode: box
         balancing_aktiv:
           name: Balancing-Fenster
           description: >-
@@ -280,7 +305,8 @@ blueprint:
           description: >-
             Zusatzbedarf an Ladeleistung, um aus der Drosselung wieder in den
             Normalbetrieb zu wechseln. Verhindert Springen zwischen gedrosselter
-            und voller Ausgabe bei schwankender PV-Leistung.
+            und voller Ausgabe bei schwankender PV-Leistung. Gilt ebenso für
+            das Einschalten der PV-Durchleitung.
           default: 100
           selector:
             number:
@@ -380,6 +406,8 @@ actions:
       drossel_watt_v: !input drossel_watt
       hw_min_watt_v: !input hw_min_watt
       drossel_hyst_v: !input drossel_hysterese
+      durchleitung_v: !input pv_durchleitung
+      reserve_v: !input pv_reserve
       surplus_nachlauf_v: !input surplus_nachlauf
       max_alter_v: !input max_sensor_alter
       # Netzwert gültig? Eingefrorene Werte zählen nicht als gültig, denn bei
@@ -407,6 +435,19 @@ actions:
       basis: "{{ 0 if switch_status != 'on' else states(e_number) | float(0) }}"
       sollwert: "{{ basis + grid_p * kp_v }}"
       wunsch: "{{ [sollwert | float(0), max_watt_v] | min }}"
+      # PV-Durchleitung während der SoC-Sperre: Einschalten erst, wenn die
+      # Ladeleistung Wunsch + Reserve + Hysterese übersteigt; läuft sie, wird
+      # die Ausgabe auf Ladeleistung minus Reserve gedeckelt. Nur mit Merker,
+      # denn ohne Merker hebt eine eingeschaltete Ausgabe die Sperre auf.
+      # Zu prüfen: Ob total_input_power bei aktiver Ausgabe weiterhin die
+      # PV-Eingangsleistung liefert und nicht die Netto-Ladeleistung. Sonst
+      # schaltet sich die Durchleitung selbst wieder ab.
+      durchleitung: >-
+        {% set reserve = reserve_v | float(0) %}
+        {% if not (durchleitung_v and sperre_da) %}0
+        {% elif switch_status == 'on' %}{{ [wunsch | float(0), speicher_in - reserve] | min }}
+        {% elif speicher_in > wunsch | float(0) + reserve + drossel_hyst_v | float(0) %}{{ wunsch }}
+        {% else %}0{% endif %}
       # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
       # das BMS während der Überschusseinspeisung balancieren kann.
       # Optionale Steuerung der Überschusseinspeisung.
@@ -443,8 +484,12 @@ actions:
         {# 2. Tiefentladeschutz mit Hysterese #}
         {% elif soc <= soc_off_v %}
           0
+        {# 2b. SoC-Sperre. Optional PV-Durchleitung: Der Akku lädt trotzdem um
+        mindestens die Reserve, der Merker bleibt gesetzt. Unter dem
+        Hardware-Minimum wird abgeschaltet. #}
         {% elif soc < soc_on_v and soc_gesperrt %}
-          0
+          {% set d = durchleitung | float(0) %}
+          {% if d > 0 and d >= hw_min_watt_v %}{{ d | round(0) }}{% else %}0{% endif %}
         {# 3. Hardware-Limit: zu kleiner Bedarf oder Überschuss -> aus #}
         {% elif sollwert < hw_min_watt_v %}
           0
