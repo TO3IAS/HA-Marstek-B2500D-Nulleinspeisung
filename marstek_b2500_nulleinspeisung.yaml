@@ -490,6 +490,11 @@ actions:
   # Überschusseinspeisung tagsüber freigeben, damit der volle Speicher
   # balancieren kann. Der Zeitplan muss dabei zwingend zuerst aus, sonst
   # stellt der Speicher den Betrieb komplett ein.
+  # Nach dem Umschalten endet der Lauf: ziel_leistung wurde noch mit dem alten
+  # Zustand berechnet und würde sonst den Zeitplan wieder einschalten.
+  # Zu prüfen: Ob hm2mqtt Schalterzustände erst nach Bestätigung durch das
+  # Gerät meldet oder optimistisch setzt. Im zweiten Fall bestätigen die
+  # Wartezeiten nur den Zustand in Home Assistant, nicht den am Gerät.
   - if:
       - condition: template
         value_template: "{{ surplus_ein }}"
@@ -501,9 +506,18 @@ actions:
           - action: switch.turn_off
             target:
               entity_id: !input speicher_switch
+      # Ohne bestätigtes "Zeitplan aus" endet der Lauf hier (Timeout), und der
+      # nächste Trigger versucht es erneut.
+      - wait_template: "{{ is_state(e_switch, 'off') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: false
       - action: switch.turn_on
         target:
           entity_id: !input surplus_switch
+      - wait_template: "{{ is_state(e_surplus[0], 'on') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: true
+      - stop: Überschusseinspeisung eingeschaltet
 
   # Nach Sonnenuntergang und abgeklungener Ladeleistung wieder abschalten,
   # damit der Speicher nachts normal entladen werden kann.
@@ -514,6 +528,10 @@ actions:
       - action: switch.turn_off
         target:
           entity_id: !input surplus_switch
+      - wait_template: "{{ is_state(e_surplus[0], 'off') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: true
+      - stop: Überschusseinspeisung ausgeschaltet
 
   # Totband: kleine Sollwertänderungen gar nicht erst schreiben
   - condition: template
@@ -561,9 +579,14 @@ actions:
               {{ (states(e_number) | float(-1) - ziel_leistung | float(0)) | abs < 1 }}
             timeout: "00:00:15"
             continue_on_timeout: true
+          # Verriegelung: Den Zeitplan nur einschalten, wenn die
+          # Überschusseinspeisung jetzt (live, nicht laut Variable vom
+          # Laufbeginn) sicher aus ist. 'on' oder nicht verfügbar -> nicht.
           - if:
               - condition: template
-                value_template: "{{ switch_status != 'on' }}"
+                value_template: >-
+                  {{ switch_status != 'on'
+                     and (not surplus_da or is_state(e_surplus[0], 'off')) }}
             then:
               - action: switch.turn_on
                 target:
