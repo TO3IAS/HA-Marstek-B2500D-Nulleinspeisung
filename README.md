@@ -19,7 +19,6 @@ Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B250
 - **Watchdog** gegen eingefrorene Messwerte, unabhängig von eintreffenden Sensordaten
 - Tiefentladeschutz mit SoC-Hysterese (Abschalten / Wiedereinschalten)
 - Sparmodus: Drosselung auf einen festen Wert bei niedrigem Akkustand
-- Lastspitzen-Drosselung, statt sinnlos gegen den Wasserkocher anzuregeln
 - Drosselung wird aufgehoben, wenn die PV-Ladeleistung die Ausgabe ohnehin trägt
 - Hardware-Mindestleistung: unterhalb davon wird sauber abgeschaltet
 
@@ -58,6 +57,14 @@ Zusammen mit dem Netzleistungssensor sind das fünf Entitäten, mit dem optional
 > Bleibt das Feld leer, muss die Überschusseinspeisung **dauerhaft ausgeschaltet** sein. Die Regelung würde sonst den Zeitplan dazuschalten und den Speicher lahmlegen. Ohne Überschusseinspeisung findet allerdings auch kein Balancing statt – siehe [Balancing](#balancing-warum-die-regelung-sich-zurückzieht).
 
 Der zweite Grund für die Automatik: Bei vollem Akku und eingeschalteter Überschusseinspeisung koppelt der Speicher seine Ausgabe an die Eingangsleistung. Nachts ist die null – der Speicher gäbe also nichts ab, obwohl er voll ist. Das Abschalten nach Sonnenuntergang gibt ihn für die normale Regelung wieder frei.
+
+### Merker für die SoC-Sperre (empfohlen)
+
+Nach einer Abschaltung wegen Tiefentladung gibt die Automation die Ausgabe erst ab der Wiedereinschaltschwelle wieder frei. Damit sie diese Sperre von anderen Abschaltungen unterscheiden kann (geringer Bedarf, Watchdog, Überschusseinspeisung), braucht sie einen Merker:
+
+*Einstellungen → Geräte & Dienste → Helfer → Helfer erstellen → Schalter (`input_boolean`)*, z. B. „B2500 SoC-Sperre“, und im Blueprint unter *Akku-Schutz* hinterlegen. Den Helfer nicht von Hand schalten.
+
+Ohne Merker gilt das bisherige Verhalten: Jede ausgeschaltete Ausgabe bleibt unterhalb der Wiedereinschaltschwelle aus. Schaltet der Speicher abends bei 20 % wegen kurz geringem Bedarf ab, bleibt er dann bis zum nächsten Tag aus.
 
 ### Geglätteter Sensor (empfohlen)
 
@@ -130,6 +137,7 @@ Abschalten (0 W) ist von Wartezeit und Anlaufsperre ausgenommen und erfolgt imme
 | SoC Abschaltschwelle | `15 %` | Darunter wird die Ausgabe gesperrt |
 | SoC Wiedereinschaltschwelle | `25 %` | Erst hier wird wieder freigegeben |
 | SoC Drosselschwelle (Eco) | `40 %` | Darunter greift die Drosselung |
+| Merker SoC-Sperre | leer | Optional, empfohlen; siehe [Merker für die SoC-Sperre](#merker-für-die-soc-sperre-empfohlen) |
 | Balancing-Fenster | an | Bei 100 % SoC volle Ausgabe freigeben |
 | Schalter Überschusseinspeisung | leer | Optional; leer = dauerhaft von Hand eingeschaltet lassen |
 | Nachlaufzeit der Überschusseinspeisung | `10 min` | Wartezeit bei ruhender Ladeleistung vor dem Abschalten |
@@ -173,12 +181,16 @@ Anschließend läuft eine Kaskade von oben nach unten – die erste zutreffende 
 | 0 | Netzwert ungültig oder zu alt | 0 W, Switch aus |
 | 1 | Überschusseinspeisung ist eingeschaltet | 0 W, Zeitplan aus (Balancing) |
 | 2 | SoC ≤ Abschaltschwelle | 0 W, Switch aus |
-| 2 | SoC < Wiedereinschaltschwelle **und** Ausgabe ist aus | bleibt aus |
+| 2 | SoC < Wiedereinschaltschwelle **und** SoC-Sperre aktiv | bleibt aus |
 | 3 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus |
-| 4 | (SoC < Drosselschwelle **oder** Sollwert > Maximum) **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
+| 4 | SoC < Drosselschwelle **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
 | 5 | alles andere | Sollwert, gedeckelt auf das Maximum |
 
-Danach greifen Totband, Wartezeit und Anlaufsperre. Der Switch wird nur bei echtem Zustandswechsel geschaltet, und der Watt-Wert wird **vor** dem Einschalten gesetzt, damit der Speicher beim Anlaufen nie kurz einen veralteten Wert ausgibt.
+Die SoC-Sperre ist mit Merker nur nach einer Abschaltung wegen Tiefentladung aktiv, ohne Merker immer dann, wenn die Ausgabe aus ist.
+
+Ein Bedarf über der maximalen Ausgabeleistung führt nicht zur Drosselung, die Ausgabe bleibt einfach am Maximum. Bei voller Ausgabe liegt der Sollwert bei jedem Netzbezug über dem Maximum. Eine Drosselung darauf würde die Ausgabe bei Dauerlasten knapp über dem Maximum ständig zwischen Drosselwert und Vollwert springen lassen.
+
+Danach greifen Totband, Wartezeit und Anlaufsperre. Der Switch wird nur bei echtem Zustandswechsel geschaltet, und der Watt-Wert wird **vor** dem Einschalten gesetzt, damit der Speicher beim Anlaufen nie kurz einen veralteten Wert ausgibt. Nach dem Schreiben wartet die Automation bis zu 15 Sekunden, bis die Number-Entity den neuen Wert zurückmeldet. Trigger in dieser Zeit werden verworfen, damit kein Durchlauf mit dem alten Wert als Basis rechnet.
 
 ### Balancing: warum die Regelung sich zurückzieht
 
@@ -196,7 +208,7 @@ Daraus ergibt sich der Tagesablauf:
 | --- | --- |
 | Speicher erreicht tagsüber 100 % | Zeitplan wird abgeschaltet, dann die Überschusseinspeisung eingeschaltet |
 | Nachmittag | Der Speicher leitet durch und balanciert; die Regelung ruht |
-| Nach Sonnenuntergang, Ladeleistung seit der Nachlaufzeit bei null | Überschusseinspeisung aus |
+| Nach Sonnenuntergang, Ladeleistung seit der Nachlaufzeit unter 10 W | Überschusseinspeisung aus |
 | Abend und Nacht | Normale Nulleinspeisungs-Regelung über den Zeitplan |
 
 > **Der Preis:** Am Nachmittag wird ins Netz eingespeist, sobald die PV-Leistung über dem Hausverbrauch liegt. Wer das partout nicht will, schaltet die Balancing-Automatik ab – sollte dem Speicher dann aber auf anderem Weg regelmäßig Zeit bei 100 % Ladezustand mit eingeschalteter Überschusseinspeisung verschaffen.
@@ -241,7 +253,7 @@ Bei eingeschalteter Überschusseinspeisung hängt die Ausgabe an der Eingangslei
 Die Automation schaltet sie erst bei 100 % Ladezustand ein. Erreicht der Speicher die 100 % nie, passiert auch nichts. In dem Fall die Entladetiefe vorübergehend begrenzen, damit er mittags wirklich voll wird.
 
 **Die Automation regelt gar nicht mehr**
-Die Regelung liest ihre eigene Basis aus der Number-Entity und misst die Wartezeit über deren `last_changed`. Meldet die Integration diese Entity nicht zuverlässig zurück, steht die Regelung. Zum Test die Wartezeiten auf `0` setzen – regelt es dann wieder, liegt es daran.
+Die Regelung liest ihre eigene Basis aus der Number-Entity und misst die Wartezeit über deren `last_changed`. Meldet die Integration diese Entity nicht zuverlässig zurück, steht die Regelung, und nach jedem Schreiben läuft die 15-Sekunden-Wartezeit auf die Rückmeldung voll ab. Zum Test die Wartezeiten auf `0` setzen – regelt es dann wieder, liegt es daran.
 
 **Die Automation läuft, tut aber nichts**
 In den Traces prüfen, an welcher Bedingung sie abbricht. Häufigste Ursachen: Totband nicht überschritten, Wartezeit oder Anlaufsperre noch nicht abgelaufen, oder ein Sensor liefert `unavailable`.
@@ -255,6 +267,14 @@ Perfekte Nulleinspeisung ist mit diesem Aufbau nicht erreichbar. Aus Sensortakt,
 ---
 
 ## Changelog
+
+### v2.3
+
+- **Keine Drosselung mehr bei Bedarf über dem Maximum.** Bisher sprang die Ausgabe bei Dauerlasten knapp über der maximalen Ausgabeleistung (mit Standardwerten ca. 820–1200 W) ständig zwischen Drosselwert und Vollwert. Bei noch höherer Last blieb sie trotz vollem Akku auf dem Drosselwert. Jetzt bleibt sie am Maximum; gedrosselt wird nur noch bei niedrigem Akkustand
+- Neuer optionaler **Merker für die SoC-Sperre** (`input_boolean`): Die Wiedereinschaltschwelle gilt damit nur noch nach einer Abschaltung wegen Tiefentladung, nicht nach jeder Abschaltung
+- Nachlaufzeit der Überschusseinspeisung: Schwankungen der Ladeleistung unter 10 W setzen sie nicht mehr zurück
+- Watchdog prüft `last_reported` statt `last_updated`: Ein gleichbleibender, aber weiterhin gemeldeter Netzwert löst keine Abschaltung mehr aus
+- Nach dem Schreiben des Sollwerts wartet die Automation bis zu 15 s auf die Rückmeldung der Number-Entity (`mode: single` statt `restart`)
 
 ### v2.2
 
