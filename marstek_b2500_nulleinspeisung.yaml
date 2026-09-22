@@ -268,7 +268,9 @@ blueprint:
       input:
         max_watt:
           name: Maximale Ausgabeleistung
-          description: Obergrenze der Ausgabe im Normalbetrieb und im Balancing-Fenster.
+          description: >-
+            Obergrenze der geregelten Ausgabe. Während der
+            Überschusseinspeisung regelt der Speicher selbst.
           default: 800
           selector:
             number:
