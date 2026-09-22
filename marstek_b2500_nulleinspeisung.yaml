@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.2 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.3 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -14,8 +14,8 @@ blueprint:
 
     Enthalten: Balancing-Fenster bei vollem Speicher, Watchdog gegen eingefrorene
     Messwerte, Anlaufsperre nach dem Einschalten, SoC-Hysterese gegen
-    Tiefentladung, Drosselung auf einen Sparwert bei niedrigem Akkustand oder
-    Lastspitzen, Hardware-Mindestleistung und Totband.
+    Tiefentladung, Drosselung auf einen Sparwert bei niedrigem Akkustand,
+    Hardware-Mindestleistung und Totband.
 
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
@@ -182,6 +182,20 @@ blueprint:
               max: 100
               unit_of_measurement: "%"
               mode: slider
+        soc_sperre_merker:
+          name: Merker SoC-Sperre (optional)
+          description: >-
+            Empfohlen. Ein Schalter-Helfer (input_boolean), in dem sich die
+            Automation merkt, dass wegen Tiefentladung abgeschaltet wurde. Nur
+            dann gilt die Wiedereinschaltschwelle. Ohne Merker bleibt jede
+            abgeschaltete Ausgabe unterhalb der Wiedereinschaltschwelle aus,
+            auch wenn sie aus einem anderen Grund abgeschaltet wurde (z. B.
+            geringer Bedarf oder Watchdog).
+          default: []
+          selector:
+            entity:
+              domain: input_boolean
+              multiple: true
         balancing_aktiv:
           name: Balancing-Fenster
           description: >-
@@ -212,8 +226,8 @@ blueprint:
         surplus_nachlauf:
           name: Nachlaufzeit der Überschusseinspeisung
           description: >-
-            So lange muss die Ladeleistung nach Sonnenuntergang bei null liegen,
-            bevor die Überschusseinspeisung wieder ausgeschaltet wird.
+            So lange muss die Ladeleistung nach Sonnenuntergang unter 10 W
+            liegen, bevor die Überschusseinspeisung wieder ausgeschaltet wird.
           default: 10
           selector:
             number:
@@ -240,7 +254,7 @@ blueprint:
         drossel_watt:
           name: Gedrosselte Ausgabeleistung
           description: >-
-            Fester Ausgabewert bei niedrigem Akkustand oder Lastspitzen. Muss
+            Fester Ausgabewert bei niedrigem Akkustand. Muss
             mindestens so hoch wie die Hardware-Mindestleistung sein.
           default: 200
           selector:
@@ -302,7 +316,12 @@ blueprint:
           selector:
             boolean:
 
-mode: restart
+mode: single
+max_exceeded: silent
+
+# In Triggern nutzbare Variablen (reguläre `variables:` stehen dort nicht zur Verfügung).
+trigger_variables:
+  t_in: !input speicher_input_sensor
 
 triggers:
   - trigger: state
@@ -315,6 +334,14 @@ triggers:
   - trigger: time_pattern
     minutes: /1
     id: watchdog
+  # Ladeleistung ruht nachts. Anders als last_changed setzen Schwankungen
+  # unter 10 W die Nachlaufzeit hier nicht zurück.
+  - trigger: template
+    value_template: >-
+      {{ states(t_in) | float(99) < 10 and is_state('sun.sun', 'below_horizon') }}
+    for:
+      minutes: !input surplus_nachlauf
+    id: laden_ruht
 
 conditions: []
 
@@ -326,6 +353,7 @@ actions:
       e_switch: !input speicher_switch
       e_number: !input speicher_watt_number
       e_surplus: !input surplus_switch
+      e_sperre: !input soc_sperre_merker
       soc_trigger_aktiv: !input soc_trigger
 
   # SoC-Trigger nur auswerten, wenn in den Optionen aktiviert
@@ -356,15 +384,24 @@ actions:
       max_alter_v: !input max_sensor_alter
       # Netzwert gültig? Eingefrorene Werte zählen nicht als gültig, denn bei
       # aktivem Keep-last-sample wird der Sensor nie unavailable.
+      # last_reported statt last_updated: Ein gleichbleibender, aber weiterhin
+      # gemeldeter Wert ist nicht eingefroren.
       netz_ok: >-
         {{ has_value(e_grid)
            and (max_alter_v | float(0) == 0
-                or (now() - states[e_grid].last_updated).total_seconds()
+                or (now() - states[e_grid].last_reported).total_seconds()
                     < max_alter_v | float(0)) }}
       grid_p: "{{ states(e_grid) | float(0) }}"
       speicher_in: "{{ states(e_in) | float(0) }}"
       soc: "{{ states(e_soc) | float(0) }}"
       switch_status: "{{ states(e_switch) }}"
+      # SoC-Sperre: mit Merker nur nach Abschaltung wegen Tiefentladung, ohne
+      # Merker (Verhalten bis v2.2) bei jeder ausgeschalteten Ausgabe.
+      sperre_da: "{{ e_sperre | count > 0 }}"
+      sperre_status: >-
+        {{ states(e_sperre[0]) if sperre_da else 'none' }}
+      soc_gesperrt: >-
+        {{ sperre_status == 'on' if sperre_da else switch_status != 'on' }}
       # Regelbasis ist der zuletzt gesetzte Sollwert, nicht die träge gemessene
       # Ausgabe. Bei ausgeschaltetem Speicher ist die reale Abgabe null.
       basis: "{{ 0 if switch_status != 'on' else states(e_number) | float(0) }}"
@@ -381,11 +418,13 @@ actions:
       # gleichzeitig aktiv sein, sonst stellt der Speicher den Betrieb ein.
       surplus_an: "{{ surplus_da and surplus_status == 'on' }}"
       ist_nacht: "{{ states('sun.sun') == 'below_horizon' }}"
-      # Sekunden, seit die Ladeleistung zuletzt einen anderen Wert hatte
+      # Ladeleistung ruht: über den Trigger oder, falls der nicht feuern
+      # konnte (z. B. nach einem Neustart), über last_changed.
       laden_ruht: >-
-        {{ speicher_in < 10
-           and (now() - states[e_in].last_changed).total_seconds()
-               >= surplus_nachlauf_v | float(0) * 60 }}
+        {{ trigger.id == 'laden_ruht'
+           or (speicher_in < 10
+               and (now() - states[e_in].last_changed).total_seconds()
+                   >= surplus_nachlauf_v | float(0) * 60) }}
       surplus_ein: >-
         {{ surplus_da and balancing_aktiv_v and surplus_status == 'off'
            and soc >= 100 and not ist_nacht }}
@@ -404,15 +443,17 @@ actions:
         {# 2. Tiefentladeschutz mit Hysterese #}
         {% elif soc <= soc_off_v %}
           0
-        {% elif soc < soc_on_v and switch_status != 'on' %}
+        {% elif soc < soc_on_v and soc_gesperrt %}
           0
         {# 3. Hardware-Limit: zu kleiner Bedarf oder Überschuss -> aus #}
         {% elif sollwert < hw_min_watt_v %}
           0
-        {# 4. Drossel-Regel bei niedrigem Akku oder Lastspitze, aber nur wenn die
-        Ladeleistung die geplante Ausgabe nicht trägt. Aus der Drosselung heraus
-        braucht es zusätzlich die Hysterese, damit es nicht hin- und herspringt #}
-        {% elif (soc < soc_drossel_v or sollwert > max_watt_v)
+        {# 4. Drossel-Regel bei niedrigem Akku, aber nur wenn die Ladeleistung
+        die geplante Ausgabe nicht trägt. Aus der Drosselung heraus braucht es
+        zusätzlich die Hysterese, damit es nicht hin- und herspringt. Bedarf
+        über dem Maximum drosselt bewusst nicht: Der Sollwert liegt bei voller
+        Ausgabe dann immer über dem Maximum, das ergäbe ein Sägezahnmuster. #}
+        {% elif soc < soc_drossel_v
                 and wunsch > drossel_watt_v
                 and speicher_in < wunsch + (drossel_hyst_v if basis <= drossel_watt_v + 20 else 0) %}
           {{ drossel_watt_v }}
@@ -428,6 +469,23 @@ actions:
         {% if z == 0 %}0
         {% elif z < basis %}{{ wartezeit_runter_v }}
         {% else %}{{ wartezeit_hoch_v }}{% endif %}
+
+  # Merker der SoC-Sperre: setzen bei Tiefentladung, lösen erst ab der
+  # Wiedereinschaltschwelle.
+  - if:
+      - condition: template
+        value_template: "{{ sperre_da and soc <= soc_off_v and sperre_status == 'off' }}"
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input soc_sperre_merker
+  - if:
+      - condition: template
+        value_template: "{{ sperre_da and soc >= soc_on_v and sperre_status == 'on' }}"
+    then:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: !input soc_sperre_merker
 
   # Überschusseinspeisung tagsüber freigeben, damit der volle Speicher
   # balancieren kann. Der Zeitplan muss dabei zwingend zuerst aus, sonst
@@ -496,6 +554,13 @@ actions:
               entity_id: !input speicher_watt_number
             data:
               value: "{{ ziel_leistung | float(0) }}"
+          # Auf die Rückmeldung warten. Sonst rechnet ein Folgelauf mit dem
+          # alten Wert als Basis, und die Wartezeit (last_changed) greift nicht.
+          # Trigger in dieser Zeit verwirft mode: single.
+          - wait_template: >-
+              {{ (states(e_number) | float(-1) - ziel_leistung | float(0)) | abs < 1 }}
+            timeout: "00:00:15"
+            continue_on_timeout: true
           - if:
               - condition: template
                 value_template: "{{ switch_status != 'on' }}"
