@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.3 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.4 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -14,7 +14,8 @@ blueprint:
 
     Enthalten: Balancing-Fenster bei vollem Speicher, Watchdog gegen eingefrorene
     Messwerte, Anlaufsperre nach dem Einschalten, SoC-Hysterese gegen
-    Tiefentladung, Drosselung auf einen Sparwert bei niedrigem Akkustand,
+    Tiefentladung, optionale PV-Durchleitung während der SoC-Sperre,
+    Drosselung auf einen Sparwert bei niedrigem Akkustand,
     Hardware-Mindestleistung und Totband.
 
 
@@ -196,6 +197,31 @@ blueprint:
             entity:
               domain: input_boolean
               multiple: true
+        pv_durchleitung:
+          name: PV-Durchleitung trotz SoC-Sperre
+          description: >-
+            Gibt während der SoC-Sperre (zwischen Abschalt- und
+            Wiedereinschaltschwelle) Leistung ab, solange so viel PV-Leistung in
+            den Speicher fließt, dass er trotzdem mindestens um die Reserve
+            geladen wird. Die Sperre selbst bleibt bestehen. Wirkt nur mit
+            hinterlegtem Merker SoC-Sperre. Unterhalb der Abschaltschwelle
+            bleibt die Ausgabe immer aus.
+          default: false
+          selector:
+            boolean:
+        pv_reserve:
+          name: Reserve der PV-Durchleitung
+          description: >-
+            Ladeleistung, die während der PV-Durchleitung mindestens im Akku
+            ankommen soll. Die Ausgabe wird auf Ladeleistung minus Reserve
+            begrenzt.
+          default: 50
+          selector:
+            number:
+              min: 0
+              max: 500
+              unit_of_measurement: "W"
+              mode: box
         balancing_aktiv:
           name: Balancing-Fenster
           description: >-
@@ -243,7 +269,9 @@ blueprint:
       input:
         max_watt:
           name: Maximale Ausgabeleistung
-          description: Obergrenze der Ausgabe im Normalbetrieb und im Balancing-Fenster.
+          description: >-
+            Obergrenze der geregelten Ausgabe. Während der
+            Überschusseinspeisung regelt der Speicher selbst.
           default: 800
           selector:
             number:
@@ -280,7 +308,8 @@ blueprint:
           description: >-
             Zusatzbedarf an Ladeleistung, um aus der Drosselung wieder in den
             Normalbetrieb zu wechseln. Verhindert Springen zwischen gedrosselter
-            und voller Ausgabe bei schwankender PV-Leistung.
+            und voller Ausgabe bei schwankender PV-Leistung. Gilt ebenso für
+            das Einschalten der PV-Durchleitung.
           default: 100
           selector:
             number:
@@ -380,6 +409,8 @@ actions:
       drossel_watt_v: !input drossel_watt
       hw_min_watt_v: !input hw_min_watt
       drossel_hyst_v: !input drossel_hysterese
+      durchleitung_v: !input pv_durchleitung
+      reserve_v: !input pv_reserve
       surplus_nachlauf_v: !input surplus_nachlauf
       max_alter_v: !input max_sensor_alter
       # Netzwert gültig? Eingefrorene Werte zählen nicht als gültig, denn bei
@@ -407,6 +438,19 @@ actions:
       basis: "{{ 0 if switch_status != 'on' else states(e_number) | float(0) }}"
       sollwert: "{{ basis + grid_p * kp_v }}"
       wunsch: "{{ [sollwert | float(0), max_watt_v] | min }}"
+      # PV-Durchleitung während der SoC-Sperre: Einschalten erst, wenn die
+      # Ladeleistung Wunsch + Reserve + Hysterese übersteigt; läuft sie, wird
+      # die Ausgabe auf Ladeleistung minus Reserve gedeckelt. Nur mit Merker,
+      # denn ohne Merker hebt eine eingeschaltete Ausgabe die Sperre auf.
+      # Zu prüfen: Ob total_input_power bei aktiver Ausgabe weiterhin die
+      # PV-Eingangsleistung liefert und nicht die Netto-Ladeleistung. Sonst
+      # schaltet sich die Durchleitung selbst wieder ab.
+      durchleitung: >-
+        {% set reserve = reserve_v | float(0) %}
+        {% if not (durchleitung_v and sperre_da) %}0
+        {% elif switch_status == 'on' %}{{ [wunsch | float(0), speicher_in - reserve] | min }}
+        {% elif speicher_in > wunsch | float(0) + reserve + drossel_hyst_v | float(0) %}{{ wunsch }}
+        {% else %}0{% endif %}
       # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
       # das BMS während der Überschusseinspeisung balancieren kann.
       # Optionale Steuerung der Überschusseinspeisung.
@@ -443,8 +487,12 @@ actions:
         {# 2. Tiefentladeschutz mit Hysterese #}
         {% elif soc <= soc_off_v %}
           0
+        {# 2b. SoC-Sperre. Optional PV-Durchleitung: Der Akku lädt trotzdem um
+        mindestens die Reserve, der Merker bleibt gesetzt. Unter dem
+        Hardware-Minimum wird abgeschaltet. #}
         {% elif soc < soc_on_v and soc_gesperrt %}
-          0
+          {% set d = durchleitung | float(0) %}
+          {% if d > 0 and d >= hw_min_watt_v %}{{ d | round(0) }}{% else %}0{% endif %}
         {# 3. Hardware-Limit: zu kleiner Bedarf oder Überschuss -> aus #}
         {% elif sollwert < hw_min_watt_v %}
           0
@@ -490,6 +538,11 @@ actions:
   # Überschusseinspeisung tagsüber freigeben, damit der volle Speicher
   # balancieren kann. Der Zeitplan muss dabei zwingend zuerst aus, sonst
   # stellt der Speicher den Betrieb komplett ein.
+  # Nach dem Umschalten endet der Lauf: ziel_leistung wurde noch mit dem alten
+  # Zustand berechnet und würde sonst den Zeitplan wieder einschalten.
+  # Zu prüfen: Ob hm2mqtt Schalterzustände erst nach Bestätigung durch das
+  # Gerät meldet oder optimistisch setzt. Im zweiten Fall bestätigen die
+  # Wartezeiten nur den Zustand in Home Assistant, nicht den am Gerät.
   - if:
       - condition: template
         value_template: "{{ surplus_ein }}"
@@ -501,9 +554,18 @@ actions:
           - action: switch.turn_off
             target:
               entity_id: !input speicher_switch
+      # Ohne bestätigtes "Zeitplan aus" endet der Lauf hier (Timeout), und der
+      # nächste Trigger versucht es erneut.
+      - wait_template: "{{ is_state(e_switch, 'off') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: false
       - action: switch.turn_on
         target:
           entity_id: !input surplus_switch
+      - wait_template: "{{ is_state(e_surplus[0], 'on') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: true
+      - stop: Überschusseinspeisung eingeschaltet
 
   # Nach Sonnenuntergang und abgeklungener Ladeleistung wieder abschalten,
   # damit der Speicher nachts normal entladen werden kann.
@@ -514,6 +576,10 @@ actions:
       - action: switch.turn_off
         target:
           entity_id: !input surplus_switch
+      - wait_template: "{{ is_state(e_surplus[0], 'off') }}"
+        timeout: "00:00:15"
+        continue_on_timeout: true
+      - stop: Überschusseinspeisung ausgeschaltet
 
   # Totband: kleine Sollwertänderungen gar nicht erst schreiben
   - condition: template
@@ -561,9 +627,14 @@ actions:
               {{ (states(e_number) | float(-1) - ziel_leistung | float(0)) | abs < 1 }}
             timeout: "00:00:15"
             continue_on_timeout: true
+          # Verriegelung: Den Zeitplan nur einschalten, wenn die
+          # Überschusseinspeisung jetzt (live, nicht laut Variable vom
+          # Laufbeginn) sicher aus ist. 'on' oder nicht verfügbar -> nicht.
           - if:
               - condition: template
-                value_template: "{{ switch_status != 'on' }}"
+                value_template: >-
+                  {{ switch_status != 'on'
+                     and (not surplus_da or is_state(e_surplus[0], 'off')) }}
             then:
               - action: switch.turn_on
                 target:

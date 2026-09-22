@@ -18,6 +18,7 @@ Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B250
 - **Anlaufsperre**, weil der Speicher nach dem Einschalten ein bis zwei Minuten braucht
 - **Watchdog** gegen eingefrorene Messwerte, unabhängig von eintreffenden Sensordaten
 - Tiefentladeschutz mit SoC-Hysterese (Abschalten / Wiedereinschalten)
+- Optional: **PV-Durchleitung** während der SoC-Sperre, solange der Akku trotzdem lädt
 - Sparmodus: Drosselung auf einen festen Wert bei niedrigem Akkustand
 - Drosselung wird aufgehoben, wenn die PV-Ladeleistung die Ausgabe ohnehin trägt
 - Hardware-Mindestleistung: unterhalb davon wird sauber abgeschaltet
@@ -30,17 +31,24 @@ Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B250
 - Ein Marstek B2500, eingebunden z. B. über [hm2mqtt](https://github.com/tomquist/hm2mqtt)
 - Ein Netzleistungssensor (Powerfox, Shelly 3EM, Tibber Pulse, …)
 
-Aus der Speicher-Integration werden vier Entitäten benötigt:
+Pflicht sind fünf Entitäten, vier davon aus der Speicher-Integration:
 
 | Typ | Beispiel (hm2mqtt) |
 | --- | --- |
+| Netzleistung | Powerfox, Shelly 3EM, …, am besten geglättet (siehe unten) |
 | Ladeleistung | `sensor.…_total_input_power` |
 | Ladezustand | `sensor.…_battery_percentage` |
 | Ausgabe-Schalter | `switch.…_time_period_1_enabled` |
 | Ausgabe-Sollwert | `number.…_time_period_1_output_value` |
-| Überschusseinspeisung (optional) | `switch.…_surplus_feed_in` |
 
-Zusammen mit dem Netzleistungssensor sind das fünf Entitäten, mit dem optionalen Schalter für die Überschusseinspeisung sechs. Die gemessene Ausgangsleistung wird seit v2.0 **nicht** mehr benötigt.
+Optional, aber empfohlen:
+
+| Typ | Beispiel |
+| --- | --- |
+| Schalter Überschusseinspeisung | `switch.…_surplus_feed_in` (hm2mqtt) |
+| Merker für die SoC-Sperre | selbst angelegter `input_boolean`-Helfer, siehe [unten](#merker-für-die-soc-sperre-empfohlen) |
+
+Für die Tag/Nacht-Erkennung nutzt die Automation außerdem `sun.sun`. Die gemessene Ausgangsleistung wird seit v2.0 **nicht** mehr benötigt.
 
 ### Vorzeichen des Netzleistungssensors
 
@@ -58,13 +66,21 @@ Zusammen mit dem Netzleistungssensor sind das fünf Entitäten, mit dem optional
 
 Der zweite Grund für die Automatik: Bei vollem Akku und eingeschalteter Überschusseinspeisung koppelt der Speicher seine Ausgabe an die Eingangsleistung. Nachts ist die null – der Speicher gäbe also nichts ab, obwohl er voll ist. Das Abschalten nach Sonnenuntergang gibt ihn für die normale Regelung wieder frei.
 
+So hält die Automation die Verriegelung ein:
+
+1. Vor dem Einschalten der Überschusseinspeisung schaltet sie den Zeitplan aus und wartet bis zu 15 s, bis er als aus gemeldet wird. Ohne diese Bestätigung bricht sie ab und versucht es beim nächsten Trigger erneut.
+2. Nach jedem Schalten der Überschusseinspeisung wartet sie auf die Bestätigung und beendet dann den Durchlauf. Erst der nächste Trigger regelt wieder, mit dem neuen Zustand.
+3. Direkt vor dem Einschalten des Zeitplans liest sie den aktuellen Zustand der Überschusseinspeisung. Meldet der Schalter nicht eindeutig „aus“, auch bei `unavailable`, bleibt der Zeitplan aus.
+
+> Zu prüfen: Ob hm2mqtt Schalterzustände erst nach Bestätigung durch das Gerät meldet oder sofort optimistisch setzt. Im zweiten Fall bestätigen die Wartezeiten nur den Zustand in Home Assistant.
+
 ### Merker für die SoC-Sperre (empfohlen)
 
 Nach einer Abschaltung wegen Tiefentladung gibt die Automation die Ausgabe erst ab der Wiedereinschaltschwelle wieder frei. Damit sie diese Sperre von anderen Abschaltungen unterscheiden kann (geringer Bedarf, Watchdog, Überschusseinspeisung), braucht sie einen Merker:
 
 *Einstellungen → Geräte & Dienste → Helfer → Helfer erstellen → Schalter (`input_boolean`)*, z. B. „B2500 SoC-Sperre“, und im Blueprint unter *Akku-Schutz* hinterlegen. Den Helfer nicht von Hand schalten.
 
-Ohne Merker gilt das bisherige Verhalten: Jede ausgeschaltete Ausgabe bleibt unterhalb der Wiedereinschaltschwelle aus. Schaltet der Speicher abends bei 20 % wegen kurz geringem Bedarf ab, bleibt er dann bis zum nächsten Tag aus.
+Ohne Merker gilt das bisherige Verhalten: Jede ausgeschaltete Ausgabe bleibt unterhalb der Wiedereinschaltschwelle aus. Schaltet der Speicher abends bei 20 % wegen kurz geringem Bedarf ab, bleibt er dann bis zum nächsten Tag aus. Die [PV-Durchleitung](#pv-durchleitung-trotz-soc-sperre-optional) setzt den Merker ebenfalls voraus.
 
 ### Geglätteter Sensor (empfohlen)
 
@@ -116,7 +132,7 @@ Die Datei `marstek_b2500_nulleinspeisung.yaml` nach `config/blueprints/automatio
 
 ### Entitäten
 
-Die fünf oben genannten Entitäten auswählen. Als Netzleistungssensor den geglätteten Helfer angeben, nicht den rohen Sensor.
+Die fünf Pflicht-Entitäten auswählen. Als Netzleistungssensor den geglätteten Helfer angeben, nicht den rohen Sensor. Der Schalter der Überschusseinspeisung und der Merker für die SoC-Sperre werden unter *Akku-Schutz* hinterlegt.
 
 ### Regelverhalten
 
@@ -138,18 +154,20 @@ Abschalten (0 W) ist von Wartezeit und Anlaufsperre ausgenommen und erfolgt imme
 | SoC Wiedereinschaltschwelle | `25 %` | Erst hier wird wieder freigegeben |
 | SoC Drosselschwelle (Eco) | `40 %` | Darunter greift die Drosselung |
 | Merker SoC-Sperre | leer | Optional, empfohlen; siehe [Merker für die SoC-Sperre](#merker-für-die-soc-sperre-empfohlen) |
-| Balancing-Fenster | an | Bei 100 % SoC volle Ausgabe freigeben |
-| Schalter Überschusseinspeisung | leer | Optional; leer = dauerhaft von Hand eingeschaltet lassen |
+| PV-Durchleitung trotz SoC-Sperre | aus | Optional, braucht den Merker; siehe [PV-Durchleitung](#pv-durchleitung-trotz-soc-sperre-optional) |
+| Reserve der PV-Durchleitung | `50 W` | Ladeleistung, die während der Durchleitung mindestens im Akku ankommt |
+| Balancing-Fenster | an | Bei 100 % SoC tagsüber die Überschusseinspeisung einschalten, nach Sonnenuntergang aus |
+| Schalter Überschusseinspeisung | leer | Optional, dringend empfohlen; leer = Überschusseinspeisung muss dauerhaft **aus** bleiben |
 | Nachlaufzeit der Überschusseinspeisung | `10 min` | Wartezeit bei ruhender Ladeleistung vor dem Abschalten |
 
 ### Leistungsgrenzen
 
 | Option | Standard | Bedeutung |
 | --- | --- | --- |
-| Maximale Ausgabeleistung | `800 W` | Obergrenze im Normalbetrieb und beim Balancing |
+| Maximale Ausgabeleistung | `800 W` | Obergrenze der geregelten Ausgabe (während der Überschusseinspeisung regelt der Speicher selbst) |
 | Gedrosselte Ausgabeleistung | `200 W` | Fester Wert bei Drosselung |
-| Hardware-Mindestleistung | `80 W` | Darunter wird abgeschaltet |
-| Hysterese der Drosselung | `100 W` | Zusatzbedarf, um die Drosselung zu verlassen |
+| Hardware-Mindestleistung | `80 W` | Darunter wird abgeschaltet, auch bei der PV-Durchleitung |
+| Hysterese der Drosselung | `100 W` | Zusätzliche Ladeleistung, um die Drosselung zu verlassen oder die PV-Durchleitung einzuschalten |
 
 > Die gedrosselte Ausgabeleistung muss **mindestens so hoch** wie die Hardware-Mindestleistung sein. Sonst entsteht ein Zielwert, den keiner der beiden Ausführungszweige annimmt – die Automation täte in dem Fall schlicht nichts.
 
@@ -178,10 +196,10 @@ Anschließend läuft eine Kaskade von oben nach unten – die erste zutreffende 
 
 | Stufe | Bedingung | Ergebnis |
 | --- | --- | --- |
-| 0 | Netzwert ungültig oder zu alt | 0 W, Switch aus |
+| 0 | Netzwert ungültig oder zu alt (Watchdog) | 0 W, Switch aus |
 | 1 | Überschusseinspeisung ist eingeschaltet | 0 W, Zeitplan aus (Balancing) |
 | 2 | SoC ≤ Abschaltschwelle | 0 W, Switch aus |
-| 2 | SoC < Wiedereinschaltschwelle **und** SoC-Sperre aktiv | bleibt aus |
+| 2b | SoC < Wiedereinschaltschwelle **und** SoC-Sperre aktiv | 0 W; mit [PV-Durchleitung](#pv-durchleitung-trotz-soc-sperre-optional) höchstens Ladeleistung − Reserve |
 | 3 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus |
 | 4 | SoC < Drosselschwelle **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
 | 5 | alles andere | Sollwert, gedeckelt auf das Maximum |
@@ -191,6 +209,14 @@ Die SoC-Sperre ist mit Merker nur nach einer Abschaltung wegen Tiefentladung akt
 Ein Bedarf über der maximalen Ausgabeleistung führt nicht zur Drosselung, die Ausgabe bleibt einfach am Maximum. Bei voller Ausgabe liegt der Sollwert bei jedem Netzbezug über dem Maximum. Eine Drosselung darauf würde die Ausgabe bei Dauerlasten knapp über dem Maximum ständig zwischen Drosselwert und Vollwert springen lassen.
 
 Danach greifen Totband, Wartezeit und Anlaufsperre. Der Switch wird nur bei echtem Zustandswechsel geschaltet, und der Watt-Wert wird **vor** dem Einschalten gesetzt, damit der Speicher beim Anlaufen nie kurz einen veralteten Wert ausgibt. Nach dem Schreiben wartet die Automation bis zu 15 Sekunden, bis die Number-Entity den neuen Wert zurückmeldet. Trigger in dieser Zeit werden verworfen, damit kein Durchlauf mit dem alten Wert als Basis rechnet.
+
+### Anlaufsperre
+
+Nach dem Einschalten braucht der Speicher ein bis zwei Minuten, bis er tatsächlich Leistung abgibt. In dieser Zeit zeigt der Netzsensor weiter den vollen Bezug. Ohne Sperre würde die Regelung das als „noch zu wenig“ deuten und den Sollwert Schritt für Schritt erhöhen. Sobald der Speicher dann liefert, gibt er viel zu viel ab und speist ein.
+
+Deshalb ändert die Automation den Sollwert nach dem Einschalten für die eingestellte Zeit nicht (Standard 120 s, gemessen ab dem Einschalten des Ausgabe-Schalters). Abschalten auf 0 W ist davon ausgenommen und erfolgt immer sofort. Das gilt auch für die PV-Durchleitung: Fällt die PV in dieser Zeit ab, wird erst danach nachgeregelt.
+
+Speist der Speicher nach dem Anlaufen trotzdem kurz ein, ist die Sperre zu kurz (siehe [Feintuning](#feintuning-in-der-praxis)).
 
 ### Balancing: warum die Regelung sich zurückzieht
 
@@ -227,6 +253,28 @@ Beispiel bei 35 % SoC, Bedarf 1500 W:
 | 500 W | 200 W | trägt die 800 W nicht |
 | 1000 W | 800 W | volle Ausgabe, netto weiterhin +200 W Ladung |
 
+### PV-Durchleitung trotz SoC-Sperre (optional)
+
+Nach einer Abschaltung wegen Tiefentladung bleibt die Ausgabe bis zur Wiedereinschaltschwelle gesperrt. Morgens heißt das: Die PV lädt den Akku mit mehreren hundert Watt, und das Haus bezieht trotzdem aus dem Netz. Die Durchleitung gibt in dieser Phase einen Teil der Ladeleistung direkt ans Haus weiter. Der Akku lädt dabei immer mindestens mit der eingestellten Reserve weiter.
+
+- **Einschalten:** wenn die Ladeleistung den aktuellen Wunschwert um Reserve + Hysterese der Drosselung übersteigt (mit Standardwerten 150 W)
+- **Während sie läuft:** Die Ausgabe folgt dem Hausbedarf, höchstens aber Ladeleistung − Reserve
+- **Ausschalten:** wenn diese Grenze unter die Hardware-Mindestleistung fällt
+- **Die Sperre bleibt bestehen:** Der Merker wird weiterhin erst ab der Wiedereinschaltschwelle gelöst. Unterhalb der Abschaltschwelle bleibt die Ausgabe immer aus, auch mit Durchleitung.
+
+Beispiel bei 20 % SoC (gesperrt), Hausbedarf 300 W, Reserve 50 W:
+
+| Ladeleistung | Ausgabe | Akku netto |
+| --- | --- | --- |
+| 700 W | ≈ 300 W (Hausbedarf) | +400 W |
+| 350 W | ≈ 300 W | ≈ +50 W |
+| 250 W | 200 W (gedeckelt) | +50 W |
+| 120 W | 0 W (Grenze 70 W < Hardware-Minimum) | +120 W |
+
+Voraussetzung ist der [Merker für die SoC-Sperre](#merker-für-die-soc-sperre-empfohlen). Ohne Merker würde die eingeschaltete Ausgabe die Sperre aufheben, deshalb hat die Option dann keine Wirkung.
+
+> **Zu prüfen:** Die Durchleitung nimmt an, dass `total_input_power` auch bei aktiver Ausgabe die PV-Eingangsleistung meldet und nicht die Netto-Ladeleistung (PV minus Ausgabe). Andernfalls würde sich die Durchleitung selbst wieder abschalten. Das lässt sich in den Traces prüfen: Bei laufender Durchleitung sollte die Ladeleistung ungefähr der PV-Leistung entsprechen.
+
 ---
 
 ## Feintuning in der Praxis
@@ -237,8 +285,8 @@ Kp verringern, zuerst auf `0.4`. Hilft das nicht, die Wartezeit beim Erhöhen au
 **Nach dem Einschalten springt die Ausgabe auf Maximum und speist kurz ein**
 Die Anlaufsperre ist zu kurz. Beobachten, wie lange der Speicher nach dem Einschalten tatsächlich braucht, und den Wert entsprechend erhöhen.
 
-**Es bleibt ein konstanter Netzbezug stehen**
-Das kommt vom Totband. Auf 10 W verringern, wenn es enger sein soll – dafür werden häufiger Sollwerte geschrieben.
+**Es bleibt ein kleiner konstanter Netzbezug oder eine kleine Einspeisung stehen**
+Das kommt vom Totband. Weil jeder Schritt auf dem zuletzt gesetzten Sollwert aufbaut, wirkt die Regelung integrierend und baut die Abweichung bis auf einen Rest ab. Übrig bleibt nur, was unter dem Totband liegt: bis zu ±Totband/Kp am Netzanschluss, mit Standardwerten rund ±25 W. Je nach Richtung der letzten Änderung ist das Bezug oder Einspeisung. Mit 10 W Totband sind es rund ±17 W, dafür werden häufiger Sollwerte geschrieben. Bleibt deutlich mehr stehen, liegt es nicht am Totband. Dann in den Traces prüfen, ob Wartezeit, Anlaufsperre, Drosselung oder die maximale Ausgabeleistung greifen.
 
 **Die Ausgabe springt zwischen Drosselwert und Vollwert**
 Passiert bei schwankender PV nahe der Umschaltschwelle. Hysterese der Drosselung auf 150–200 W erhöhen.
@@ -268,40 +316,7 @@ Perfekte Nulleinspeisung ist mit diesem Aufbau nicht erreichbar. Aus Sensortakt,
 
 ## Changelog
 
-### v2.3
-
-- **Keine Drosselung mehr bei Bedarf über dem Maximum.** Bisher sprang die Ausgabe bei Dauerlasten knapp über der maximalen Ausgabeleistung (mit Standardwerten ca. 820–1200 W) ständig zwischen Drosselwert und Vollwert. Bei noch höherer Last blieb sie trotz vollem Akku auf dem Drosselwert. Jetzt bleibt sie am Maximum; gedrosselt wird nur noch bei niedrigem Akkustand
-- Neuer optionaler **Merker für die SoC-Sperre** (`input_boolean`): Die Wiedereinschaltschwelle gilt damit nur noch nach einer Abschaltung wegen Tiefentladung, nicht nach jeder Abschaltung
-- Nachlaufzeit der Überschusseinspeisung: Schwankungen der Ladeleistung unter 10 W setzen sie nicht mehr zurück
-- Watchdog prüft `last_reported` statt `last_updated`: Ein gleichbleibender, aber weiterhin gemeldeter Netzwert löst keine Abschaltung mehr aus
-- Nach dem Schreiben des Sollwerts wartet die Automation bis zu 15 s auf die Rückmeldung der Number-Entity (`mode: single` statt `restart`)
-
-### v2.2
-
-- **Verriegelung:** Überschusseinspeisung und Zeitplan werden nie gleichzeitig aktiviert. Beides zusammen legt den Speicher lahm
-- Das Balancing-Fenster gibt nicht mehr die volle Ausgabe frei, sondern schaltet den Zeitplan ab und überlässt dem Gerät das Feld
-- Beim Einschalten der Überschusseinspeisung wird zwingend zuerst der Zeitplan deaktiviert
-
-### v2.1
-
-- Optionale Automatik für die **Überschusseinspeisung**: wird der Schalter hinterlegt, schaltet die Automation ihn bei 100 % Ladezustand tagsüber ein und nach Sonnenuntergang wieder aus
-- Damit steht der volle Speicher nachts wieder für die normale Regelung zur Verfügung, statt seine Ausgabe an die Eingangsleistung zu koppeln
-- Neue Option: Nachlaufzeit vor dem Abschalten
-
-### v2.0
-
-- **Balancing-Fenster:** Bei 100 % SoC und anliegender Ladeleistung wird die volle Ausgabe freigegeben, damit das BMS die Zellen ausgleichen kann
-- **Anlaufsperre:** Nach dem Einschalten wird für eine einstellbare Zeit nicht nachgeregelt
-- **Watchdog:** Ein zusätzlicher Minuten-Trigger sorgt dafür, dass die Altersprüfung des Netzwerts auch dann greift, wenn gar keine Sensorwerte mehr eintreffen. Bisher konnte sie das nicht, weil die Automation ohne Sensoränderung nie lief
-- Bei ungültigem oder veraltetem Netzwert wird jetzt **abgeschaltet** statt nur abgebrochen
-- Regelbasis ist der zuletzt gesetzte Sollwert statt der gemessenen Ausgangsleistung – die Sensorverzögerung fällt damit aus der Regelschleife
-- Der Sensor für die Ausgangsleistung wird nicht mehr benötigt
-- Erkennung „Ausgabe ist aus" über den Schalterzustand statt über eine Ausgangsleistung von 0 W
-- Totband-Vorgabe von 25 W auf 15 W gesenkt
-
-### v1.0
-
-- Erstveröffentlichung
+Siehe [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
