@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.5 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.5.1 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -497,12 +497,15 @@ actions:
       # und der Sollwert seither unverändert geblieben ist.
       # Zu prüfen: Dass last_changed der Automations-Entität (this) bei
       # Neustart und Neuladen neu gesetzt wird.
+      # this ist ein Dict mit Zeitstempeln als ISO-Text, daher as_datetime.
       bedarf_lange_niedrig: >-
+        {% set eingerichtet = as_datetime(this.last_changed)
+             if this is not none and this.last_changed is defined else none %}
         {{ trigger.id == 'bedarf_niedrig'
-           or (this is not none
-               and (now() - this.last_changed).total_seconds()
+           or (eingerichtet is not none
+               and (now() - eingerichtet).total_seconds()
                    >= verz_v | float(0) * 60
-               and states[e_number].last_changed <= this.last_changed) }}
+               and states[e_number].last_changed <= eingerichtet) }}
       min_halten: >-
         {{ verz_v | float(0) > 0 and switch_status == 'on'
            and not bedarf_lange_niedrig }}
