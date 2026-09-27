@@ -2,6 +2,12 @@
 
 Alle nennenswerten Änderungen am Blueprint. Die Version steht jeweils am Anfang der Blueprint-Beschreibung.
 
+## v2.5.1 – 2026-09-27
+
+### Behoben
+
+- **Die Automation brach in v2.5 bei jedem Lauf ab** und tat nichts mehr, auch mit Abschaltverzögerung 0. Watchdog und Verriegelung griffen dabei ebenfalls nicht. Ursache: Der Rückfall der Abschaltverzögerung rechnete mit `this.last_changed`. Home Assistant liefert diesen Wert als ISO-Text, nicht als Datum (`TypeError: unsupported operand type(s) for -: 'datetime.datetime' and 'str'`). Der Wert wird jetzt per `as_datetime()` umgewandelt; fehlt er oder ist er ungültig, greift der Rückfall nicht.
+
 ## v2.5 – 2026-09-27
 
 ### Hinzugefügt
