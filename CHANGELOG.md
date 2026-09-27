@@ -2,6 +2,15 @@
 
 Alle nennenswerten Änderungen am Blueprint. Die Version steht jeweils am Anfang der Blueprint-Beschreibung.
 
+## v2.5 – 2026-09-27
+
+### Hinzugefügt
+
+- Optionale **Abschaltverzögerung bei geringem Bedarf** (Standard 0 = sofort abschalten wie bisher, empfohlen 3 min): Fällt der Sollwert unter die Hardware-Mindestleistung, wird zunächst die Mindestleistung gehalten. Abgeschaltet wird erst, wenn der Bedarf die eingestellte Zeit durchgehend zu gering war.
+  - Hintergrund: Nach einer Sollwertsenkung zeigt die Messung noch einige Sekunden die alte Abgabe. Der nächste Durchlauf zog die Einspeisung dann doppelt ab und schaltete ab, obwohl das Haus mehr brauchte.
+  - Zum Wiederanlaufen braucht es danach rund Hardware-Minimum / Kp Netzbezug (≈ 134 W). Bei kleiner Last blieb der Speicher deshalb aus.
+  - Gilt auch für die PV-Durchleitung, sofern die PV abzüglich Reserve das Minimum trägt. Watchdog, Überschusseinspeisung und Abschaltschwelle schalten weiterhin sofort ab.
+
 ## v2.4 – 2026-09-22
 
 ### Behoben

@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.4 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.5 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -16,7 +16,7 @@ blueprint:
     Messwerte, Anlaufsperre nach dem Einschalten, SoC-Hysterese gegen
     Tiefentladung, optionale PV-Durchleitung während der SoC-Sperre,
     Drosselung auf einen Sparwert bei niedrigem Akkustand,
-    Hardware-Mindestleistung und Totband.
+    Hardware-Mindestleistung mit optionaler Abschaltverzögerung und Totband.
 
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
