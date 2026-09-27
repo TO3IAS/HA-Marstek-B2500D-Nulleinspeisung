@@ -1,7 +1,7 @@
 blueprint:
   name: Marstek B2500 Dynamische Nulleinspeisung
   description: >-
-    v2.4 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
+    v2.5 – Dynamische Regelung eines Marstek B2500 (z. B. via hm2mqtt) auf Basis
     eines Netzleistungssensors wie Powerfox. Der Speicher gibt nur so viel
     Leistung ab, wie gerade aus dem Netz bezogen wird (Nulleinspeisung).
 
@@ -16,7 +16,7 @@ blueprint:
     Messwerte, Anlaufsperre nach dem Einschalten, SoC-Hysterese gegen
     Tiefentladung, optionale PV-Durchleitung während der SoC-Sperre,
     Drosselung auf einen Sparwert bei niedrigem Akkustand,
-    Hardware-Mindestleistung und Totband.
+    Hardware-Mindestleistung mit optionaler Abschaltverzögerung und Totband.
 
 
     Wichtig: Der Netzleistungssensor muss positiv bei Netzbezug und negativ bei
@@ -295,13 +295,31 @@ blueprint:
           name: Hardware-Mindestleistung
           description: >-
             Liegt der berechnete Sollwert darunter, wird auf 0 gesetzt und die
-            Ausgabe abgeschaltet. Deckt auch Einspeisung/Überschuss ab.
+            Ausgabe abgeschaltet, mit Abschaltverzögerung erst nach deren
+            Ablauf. Deckt auch Einspeisung/Überschuss ab.
           default: 80
           selector:
             number:
               min: 0
               max: 500
               unit_of_measurement: "W"
+              mode: box
+        abschalt_verzoegerung:
+          name: Abschaltverzögerung bei geringem Bedarf
+          description: >-
+            Fällt der berechnete Sollwert unter die Hardware-Mindestleistung,
+            wird zunächst die Mindestleistung gehalten. Abgeschaltet wird erst,
+            wenn der Bedarf so lange durchgehend zu gering war. Kurze Einbrüche,
+            die nur von verzögerten Messwerten kommen, schalten den Speicher so
+            nicht ab, denn das Wiederanlaufen kostet Zeit und Energie.
+            0 = sofort abschalten (Verhalten bis v2.4). Empfohlen: 3 min.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 30
+              step: 0.5
+              unit_of_measurement: "min"
               mode: box
         drossel_hysterese:
           name: Hysterese der Drosselung
@@ -351,6 +369,12 @@ max_exceeded: silent
 # In Triggern nutzbare Variablen (reguläre `variables:` stehen dort nicht zur Verfügung).
 trigger_variables:
   t_in: !input speicher_input_sensor
+  t_grid: !input grid_power_sensor
+  t_switch: !input speicher_switch
+  t_number: !input speicher_watt_number
+  t_kp: !input kp
+  t_hw_min: !input hw_min_watt
+  t_verz: !input abschalt_verzoegerung
 
 triggers:
   - trigger: state
@@ -371,6 +395,16 @@ triggers:
     for:
       minutes: !input surplus_nachlauf
     id: laden_ruht
+  # Geringer Bedarf: Ausgabe an und Sollwert (gleiche Formel wie unten)
+  # durchgehend unter der Hardware-Mindestleistung. Erst dann wird abgeschaltet.
+  - trigger: template
+    value_template: >-
+      {{ t_verz | float(0) > 0 and is_state(t_switch, 'on')
+         and states(t_number) | float(0) + states(t_grid) | float(0) * t_kp | float(0)
+             < t_hw_min | float(0) }}
+    for:
+      minutes: !input abschalt_verzoegerung
+    id: bedarf_niedrig
 
 conditions: []
 
@@ -408,6 +442,7 @@ actions:
       max_watt_v: !input max_watt
       drossel_watt_v: !input drossel_watt
       hw_min_watt_v: !input hw_min_watt
+      verz_v: !input abschalt_verzoegerung
       drossel_hyst_v: !input drossel_hysterese
       durchleitung_v: !input pv_durchleitung
       reserve_v: !input pv_reserve
@@ -451,6 +486,26 @@ actions:
         {% elif switch_status == 'on' %}{{ [wunsch | float(0), speicher_in - reserve] | min }}
         {% elif speicher_in > wunsch | float(0) + reserve + drossel_hyst_v | float(0) %}{{ wunsch }}
         {% else %}0{% endif %}
+      # Abschaltverzögerung: Unter dem Hardware-Minimum wird zunächst das
+      # Minimum gehalten. Ein kurzer Einbruch kommt oft nur daher, dass der
+      # Speicher einen gerade gesenkten Sollwert noch nicht umgesetzt hat und
+      # die Messung die alte Abgabe zeigt. Abgeschaltet wird, wenn der Trigger
+      # 'bedarf_niedrig' feuert (Bedarf durchgehend zu gering).
+      # Rückfall: Der Trigger feuert nicht, wenn seine Bedingung schon beim
+      # Einrichten wahr war (Neustart, Speichern der Automation). Dann wird
+      # abgeschaltet, wenn seit dem Einrichten die Verzögerung abgelaufen ist
+      # und der Sollwert seither unverändert geblieben ist.
+      # Zu prüfen: Dass last_changed der Automations-Entität (this) bei
+      # Neustart und Neuladen neu gesetzt wird.
+      bedarf_lange_niedrig: >-
+        {{ trigger.id == 'bedarf_niedrig'
+           or (this is not none
+               and (now() - this.last_changed).total_seconds()
+                   >= verz_v | float(0) * 60
+               and states[e_number].last_changed <= this.last_changed) }}
+      min_halten: >-
+        {{ verz_v | float(0) > 0 and switch_status == 'on'
+           and not bedarf_lange_niedrig }}
       # Voller Speicher mit anliegender Ladeleistung: durchleiten lassen, damit
       # das BMS während der Überschusseinspeisung balancieren kann.
       # Optionale Steuerung der Überschusseinspeisung.
@@ -489,13 +544,18 @@ actions:
           0
         {# 2b. SoC-Sperre. Optional PV-Durchleitung: Der Akku lädt trotzdem um
         mindestens die Reserve, der Merker bleibt gesetzt. Unter dem
-        Hardware-Minimum wird abgeschaltet. #}
+        Hardware-Minimum wird abgeschaltet; mit Abschaltverzögerung wird das
+        Minimum gehalten, sofern die PV es abzüglich Reserve trägt. #}
         {% elif soc < soc_on_v and soc_gesperrt %}
           {% set d = durchleitung | float(0) %}
-          {% if d > 0 and d >= hw_min_watt_v %}{{ d | round(0) }}{% else %}0{% endif %}
-        {# 3. Hardware-Limit: zu kleiner Bedarf oder Überschuss -> aus #}
+          {% if d > 0 and d >= hw_min_watt_v %}{{ d | round(0) }}
+          {% elif min_halten and durchleitung_v and sperre_da
+                  and speicher_in - reserve_v | float(0) >= hw_min_watt_v %}{{ hw_min_watt_v }}
+          {% else %}0{% endif %}
+        {# 3. Hardware-Limit: zu kleiner Bedarf oder Überschuss -> aus. Mit
+        Abschaltverzögerung erst das Minimum halten, siehe min_halten. #}
         {% elif sollwert < hw_min_watt_v %}
-          0
+          {% if min_halten %}{{ hw_min_watt_v }}{% else %}0{% endif %}
         {# 4. Drossel-Regel bei niedrigem Akku, aber nur wenn die Ladeleistung
         die geplante Ausgabe nicht trägt. Aus der Drosselung heraus braucht es
         zusätzlich die Hysterese, damit es nicht hin- und herspringt. Bedarf
