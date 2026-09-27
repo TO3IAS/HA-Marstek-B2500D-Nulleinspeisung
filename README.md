@@ -22,6 +22,7 @@ Dazu kommt ein Punkt, den die meisten Regelungen dieser Art übersehen: Der B250
 - Sparmodus: Drosselung auf einen festen Wert bei niedrigem Akkustand
 - Drosselung wird aufgehoben, wenn die PV-Ladeleistung die Ausgabe ohnehin trägt
 - Hardware-Mindestleistung: unterhalb davon wird sauber abgeschaltet
+- Optional: **Abschaltverzögerung** – bei kurzen Bedarfseinbrüchen erst die Mindestleistung halten, statt abzuschalten
 
 ---
 
@@ -167,6 +168,7 @@ Abschalten (0 W) ist von Wartezeit und Anlaufsperre ausgenommen und erfolgt imme
 | Maximale Ausgabeleistung | `800 W` | Obergrenze der geregelten Ausgabe (während der Überschusseinspeisung regelt der Speicher selbst) |
 | Gedrosselte Ausgabeleistung | `200 W` | Fester Wert bei Drosselung |
 | Hardware-Mindestleistung | `80 W` | Darunter wird abgeschaltet, auch bei der PV-Durchleitung |
+| Abschaltverzögerung bei geringem Bedarf | `0 min` (aus) | So lange wird die Mindestleistung gehalten, bevor abgeschaltet wird; empfohlen 3 min, siehe [Abschaltverzögerung](#abschaltverzögerung-bei-geringem-bedarf-optional) |
 | Hysterese der Drosselung | `100 W` | Zusätzliche Ladeleistung, um die Drosselung zu verlassen oder die PV-Durchleitung einzuschalten |
 
 > Die gedrosselte Ausgabeleistung muss **mindestens so hoch** wie die Hardware-Mindestleistung sein. Sonst entsteht ein Zielwert, den keiner der beiden Ausführungszweige annimmt – die Automation täte in dem Fall schlicht nichts.
@@ -200,7 +202,7 @@ Anschließend läuft eine Kaskade von oben nach unten – die erste zutreffende 
 | 1 | Überschusseinspeisung ist eingeschaltet | 0 W, Zeitplan aus (Balancing) |
 | 2 | SoC ≤ Abschaltschwelle | 0 W, Switch aus |
 | 2b | SoC < Wiedereinschaltschwelle **und** SoC-Sperre aktiv | 0 W; mit [PV-Durchleitung](#pv-durchleitung-trotz-soc-sperre-optional) höchstens Ladeleistung − Reserve |
-| 3 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus |
+| 3 | Sollwert < Hardware-Minimum (inkl. Einspeisung) | 0 W, Switch aus; mit [Abschaltverzögerung](#abschaltverzögerung-bei-geringem-bedarf-optional) erst das Minimum halten |
 | 4 | SoC < Drosselschwelle **und** Ladeleistung trägt die Ausgabe nicht | Drosselwert |
 | 5 | alles andere | Sollwert, gedeckelt auf das Maximum |
 
@@ -217,6 +219,30 @@ Nach dem Einschalten braucht der Speicher ein bis zwei Minuten, bis er tatsächl
 Deshalb ändert die Automation den Sollwert nach dem Einschalten für die eingestellte Zeit nicht (Standard 120 s, gemessen ab dem Einschalten des Ausgabe-Schalters). Abschalten auf 0 W ist davon ausgenommen und erfolgt immer sofort. Das gilt auch für die PV-Durchleitung: Fällt die PV in dieser Zeit ab, wird erst danach nachgeregelt.
 
 Speist der Speicher nach dem Anlaufen trotzdem kurz ein, ist die Sperre zu kurz (siehe [Feintuning](#feintuning-in-der-praxis)).
+
+### Abschaltverzögerung bei geringem Bedarf (optional)
+
+Nach einer Sollwertsenkung braucht der Speicher einige Sekunden, bis er sie umsetzt. Der geglättete Netzsensor hinkt zusätzlich hinterher. Der nächste Durchlauf sieht deshalb oft noch die alte Einspeisung und zieht sie ein zweites Mal ab. So rutscht der Sollwert rechnerisch unter die Hardware-Mindestleistung, obwohl das Haus deutlich mehr braucht.
+
+Beispiel: Die Last fällt von 400 auf 120 W.
+
+- **Ohne Verzögerung:** Die Automation senkt auf 232 W. Fünf Sekunden später misst sie noch die alten 400 W Abgabe, rechnet 64 W und schaltet ab. Zum Wiederanlaufen braucht es rund Hardware-Minimum / Kp, also ≈ 134 W Netzbezug. Bei 120 W Last bleibt der Speicher deshalb aus, und das Haus bezieht dauerhaft aus dem Netz.
+- **Mit Verzögerung:** Die Automation hält 80 W und regelt, sobald die Messung stimmt, auf den tatsächlichen Bedarf hoch.
+
+Eine längere *Wartezeit beim Reduzieren* hilft hier nicht, weil Abschalten von den Wartezeiten ausgenommen ist.
+
+Mit gesetzter Abschaltverzögerung gilt:
+
+- Fällt der Sollwert unter das Hardware-Minimum, wird zunächst das Minimum gehalten.
+- Abgeschaltet wird erst, wenn der Bedarf die eingestellte Zeit **durchgehend** unter dem Minimum lag. Jeder kurze Anstieg darüber startet die Zeit neu.
+- Das gilt auch für die PV-Durchleitung, sofern die PV abzüglich Reserve das Minimum trägt.
+- Watchdog, Überschusseinspeisung und Abschaltschwelle schalten weiterhin sofort ab.
+
+**Der Preis:** Ist der Bedarf wirklich niedrig, wird während der Verzögerung bis zu *Minimum − Bedarf* eingespeist. Bei 40 W Bedarf und 3 min sind das rund 2 Wh. Ein unnötiges Abschalten mit anschließendem Wiederanlauf kostet meist deutlich mehr.
+
+Nach einem Neustart von Home Assistant oder dem Speichern der Automation feuert der interne Trigger nicht, falls der Bedarf gerade schon unter dem Minimum liegt. Für diesen Fall schaltet die Automation ab, sobald seit dem Einrichten die Verzögerung abgelaufen ist und der Sollwert unverändert blieb.
+
+> **Zu prüfen:** Dieser Rückfall nimmt an, dass `last_changed` der Automations-Entität bei Neustart und Neuladen neu gesetzt wird. Prüfen lässt sich das unter *Entwicklerwerkzeuge → Zustände* an der Automation.
 
 ### Balancing: warum die Regelung sich zurückzieht
 
@@ -290,6 +316,9 @@ Das kommt vom Totband. Weil jeder Schritt auf dem zuletzt gesetzten Sollwert auf
 
 **Die Ausgabe springt zwischen Drosselwert und Vollwert**
 Passiert bei schwankender PV nahe der Umschaltschwelle. Hysterese der Drosselung auf 150–200 W erhöhen.
+
+**Der Speicher schaltet bei kleinem Bedarf ab und läuft danach nicht wieder an**
+Nach einer Sollwertsenkung kann die verzögerte Messung den Sollwert kurz unter das Hardware-Minimum drücken. Wieder eingeschaltet wird erst ab rund Hardware-Minimum / Kp Netzbezug (mit Standardwerten ≈ 134 W). Die [Abschaltverzögerung](#abschaltverzögerung-bei-geringem-bedarf-optional) auf etwa 3 min setzen.
 
 **Der Speicher gibt gar nichts mehr ab**
 Zuerst prüfen, ob Überschusseinspeisung und Zeitplan gleichzeitig eingeschaltet sind – das verträgt die Firmware nicht. Ist der Schalter im Blueprint hinterlegt, kann das nicht passieren.
